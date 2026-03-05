@@ -1,0 +1,27 @@
+[system]
+log_level = "info"
+log_dir = "./logs"
+
+[exchanges]
+binance_ws = "wss://fstream.binance.com/ws/btcusdt@aggTrade"
+mexc_ws = "wss://contract.mexc.com/edge"
+
+[trading]
+symbol = "BTC/USDT"
+min_spread_percent = 0.3
+binance_fee = 0.0004
+mexc_fee = 0.0002
+# Capital management settings
+initial_capital = 100.0
+position_size_percent = 10.0
+leverage = 200.0
+max_positions = 2
+
+[monitoring]
+stale_timeout_ms = 300
+latency_warning_threshold_ms = 100
+
+[api]
+host = "0.0.0.0"
+port = 3001
+cors_origins = ["http://localhost:4200"]

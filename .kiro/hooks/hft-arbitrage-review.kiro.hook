@@ -1,0 +1,20 @@
+{
+  "enabled": true,
+  "name": "HFT Arbitrage Architecture Review",
+  "description": "Monitors changes to Rust trading engine files and configuration files for the Binance-MEXC arbitrage system, triggering architectural review and optimization suggestions",
+  "version": "1",
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "src/**/*.rs",
+      "Cargo.toml",
+      "config/**/*.toml",
+      "src/**/*.ts",
+      "src/**/*.tsx"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "As a Lead Software Architect and HFT Engineer, review the modified files in the context of the inter-exchange arbitrage system between Binance and MEXC. Analyze for: 1) Performance bottlenecks in latency-critical paths, 2) Race conditions or concurrency issues, 3) Memory allocation patterns that could cause jitter, 4) API rate limit handling, 5) Order execution logic correctness, 6) Risk management implementation. Provide specific, actionable recommendations for optimization while maintaining system reliability."
+  }
+}
