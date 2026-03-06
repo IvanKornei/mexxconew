@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Торговая позиция
 #[derive(Debug, Clone, Serialize, Deserialize)]

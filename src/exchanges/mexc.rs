@@ -6,7 +6,7 @@ use tracing::{debug, error, info, warn};
 use fast_float::parse;
 
 use crate::core::CircuitBreaker;
-use crate::utils::{ConnectionError, Result};
+use crate::utils::{ConnectionError, Result, HealthChecker};
 
 // Typed structures for zero-copy deserialization (HFT optimization)
 #[derive(Debug, Deserialize)]
@@ -41,6 +41,7 @@ pub struct MexcFuturesConnector {
     url: String,
     max_reconnect_attempts: u32,
     circuit_breaker: CircuitBreaker,
+    health_checker: Option<HealthChecker>,
 }
 
 impl MexcFuturesConnector {
@@ -49,7 +50,14 @@ impl MexcFuturesConnector {
             url,
             max_reconnect_attempts: 5,
             circuit_breaker: CircuitBreaker::new(Default::default()),
+            health_checker: None,
         }
+    }
+    
+    /// Устанавливает health checker для мониторинга
+    pub fn with_health_checker(mut self, checker: HealthChecker) -> Self {
+        self.health_checker = Some(checker);
+        self
     }
     
     pub async fn connect_and_stream<F>(&self, mut callback: F) -> Result<()>
@@ -98,7 +106,16 @@ impl MexcFuturesConnector {
     {
         info!("Connecting to MEXC: {}", self.url);
         
-        let (ws_stream, _) = connect_async(&self.url).await?;
+        // Добавляем таймаут на подключение (10 секунд)
+        let connect_timeout = Duration::from_secs(10);
+        let (ws_stream, _) = tokio::time::timeout(
+            connect_timeout,
+            connect_async(&self.url)
+        ).await
+            .map_err(|_| ConnectionError::Timeout { 
+                operation: "connect".to_string(),
+                timeout_ms: connect_timeout.as_millis() as u64 
+            })??;
         info!("Connected to MEXC");
         
         let (write, mut read) = ws_stream.split();
@@ -110,7 +127,16 @@ impl MexcFuturesConnector {
         // Send subscription
         info!("Sending MEXC subscription");
         let mut write_guard = write;
-        write_guard.send(subscribe_msg).await?;
+        
+        // Добавляем таймаут на отправку подписки (5 секунд)
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            write_guard.send(subscribe_msg)
+        ).await
+            .map_err(|_| ConnectionError::Timeout {
+                operation: "subscribe".to_string(),
+                timeout_ms: 5000
+            })??;
         info!("Subscribed to MEXC Futures BTC_USDT trades");
         
         // Use Arc<Mutex> for safe shared write access between tasks
@@ -164,6 +190,11 @@ impl MexcFuturesConnector {
             while let Some(msg) = read.next().await {
                 match msg {
                     Ok(Message::Text(text)) => {
+                        // Отправляем heartbeat при получении данных
+                        if let Some(ref checker) = self.health_checker {
+                            checker.heartbeat();
+                        }
+                        
                         // Reuse buffer to avoid allocations
                         parse_buffer.clear();
                         parse_buffer.extend_from_slice(text.as_bytes());
@@ -177,7 +208,10 @@ impl MexcFuturesConnector {
                                         MexcPrice::String(ref s) => {
                                             match parse::<f64, _>(s) {
                                                 Ok(p) => p,
-                                                Err(_) => continue,
+                                                Err(e) => {
+                                                    tracing::warn!("Failed to parse MEXC price '{}': {}", s, e);
+                                                    continue;
+                                                }
                                             }
                                         }
                                     };
@@ -198,7 +232,7 @@ impl MexcFuturesConnector {
                         }
                     }
                     Ok(Message::Binary(data)) => {
-                        info!("📦 MEXC Binary: {} bytes", data.len());
+                        tracing::debug!("MEXC Binary: {} bytes", data.len());
                     }
                     Ok(Message::Ping(data)) => {
                         debug!("🏓 MEXC Ping");
@@ -219,7 +253,7 @@ impl MexcFuturesConnector {
                         return Err(e.into());
                     }
                     _ => {
-                        info!("❓ MEXC unknown message type");
+                        tracing::debug!("MEXC unknown message type");
                     }
                 }
             }

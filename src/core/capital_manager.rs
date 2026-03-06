@@ -50,7 +50,7 @@ impl CapitalManager {
     }
     
     /// Проверяет достаточно ли средств
-    pub fn can_open_position(&self, btc_price: f64) -> bool {
+    pub fn can_open_position(&self, _btc_price: f64) -> bool {
         let required_usd = self.current_capital * self.position_size_percent;
         required_usd > 0.0 && self.current_capital > 0.0
     }

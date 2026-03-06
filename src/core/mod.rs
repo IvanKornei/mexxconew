@@ -9,6 +9,9 @@ pub mod trading_history;
 pub mod ring_buffer;
 pub mod capital_manager;
 pub mod time_sync;
+pub mod price_matcher;
+pub mod price_synchronizer;
+pub mod arbitrage_decision;
 
 pub use state::PriceState;
 pub use price_feed::PriceFeedManager;
@@ -16,5 +19,5 @@ pub use circuit_breaker::CircuitBreaker;
 pub use trading_strategy::Position;
 pub use position_manager::PositionManager;
 pub use trading_history::{TradingStats, TradeRecord};
-pub use capital_manager::{CapitalManager, CapitalSettings};
 pub use time_sync::TimeSync;
+pub use ring_buffer::{RingBuffer, PriceSnapshot};

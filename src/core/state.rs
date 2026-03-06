@@ -2,6 +2,8 @@ use serde::Serialize;
 use std::collections::VecDeque;
 use std::time::{SystemTime, UNIX_EPOCH};
 use crate::core::TimeSync;
+use crate::core::price_synchronizer::PriceSynchronizer;
+use crate::core::arbitrage_decision::ArbitrageDecisionMaker;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PriceState {
@@ -30,6 +32,12 @@ pub struct PriceState {
     
     #[serde(skip)]
     time_sync: TimeSync,
+    
+    #[serde(skip)]
+    price_synchronizer: PriceSynchronizer,
+    
+    #[serde(skip)]
+    decision_maker: ArbitrageDecisionMaker,
 }
 
 // История состояний для анализа
@@ -83,6 +91,8 @@ impl Default for PriceState {
             is_scalping_opportunity: false,
             potential_profit_percent: 0.0,
             time_sync: TimeSync::new(),
+            price_synchronizer: PriceSynchronizer::new(100, 1000),
+            decision_maker: ArbitrageDecisionMaker::new(100, 1000, 0.05, 0.1, 0.005),
         }
     }
 }
@@ -95,8 +105,10 @@ impl PriceState {
         self.binance_timestamp = exchange_timestamp;
         self.binance_received_at = now;
         
-        // Обновляем синхронизацию времени
+        // Обновляем синхронизацию времени и добавляем в синхронизатор
         self.time_sync.update_binance(exchange_timestamp, now);
+        self.price_synchronizer.add_binance_price(price, exchange_timestamp, now);
+        self.decision_maker.add_binance_price(price, exchange_timestamp, now);
         
         self.recalculate_derived();
     }
@@ -108,8 +120,10 @@ impl PriceState {
         self.mexc_timestamp = exchange_timestamp;
         self.mexc_received_at = now;
         
-        // Обновляем синхронизацию времени
+        // Обновляем синхронизацию времени и добавляем в синхронизатор
         self.time_sync.update_mexc(exchange_timestamp, now);
+        self.price_synchronizer.add_mexc_price(price, exchange_timestamp, now);
+        self.decision_maker.add_mexc_price(price, exchange_timestamp, now);
         
         self.recalculate_derived();
     }
@@ -120,14 +134,14 @@ impl PriceState {
         let now = current_timestamp_ms();
         self.system_timestamp = now;
         
-        // Spread calculation
+        // Простой расчёт spread на основе последних цен
         if self.binance > 0.0 && self.mexc > 0.0 {
             self.spread = ((self.mexc - self.binance) / self.binance) * 100.0;
             self.price_diff = self.mexc - self.binance;
-            self.price_diff_percent = (self.price_diff / self.binance) * 100.0;
+            self.price_diff_percent = self.spread;
         }
         
-        // Вычисляем лаг MEXC используя синхронизацию времени
+        // Вычисляем лаг MEXC используя TimeSync
         if self.binance_timestamp > 0 && self.mexc_timestamp > 0 {
             self.mexc_lag_ms = self.time_sync.calculate_mexc_lag(
                 self.binance_timestamp,
@@ -140,18 +154,10 @@ impl PriceState {
             self.real_lag_ms = self.mexc_received_at - self.binance_received_at;
         }
         
-        // Анализ возможности скальпинга
-        // ИСПОЛЬЗУЕМ mexc_lag_ms (синхронизированный лаг)
-        const MIN_LAG_MS: i64 = 100;
-        const MIN_IMPULSE_PERCENT: f64 = 0.01;
-        const MEXC_FEE_PERCENT: f64 = 0.0;
-        const SLIPPAGE_PERCENT: f64 = 0.005;
-        const TOTAL_COST_PERCENT: f64 = MEXC_FEE_PERCENT + SLIPPAGE_PERCENT;
-        
-        // Торгуем только когда MEXC отстаёт (положительный лаг)
-        if self.mexc_lag_ms > MIN_LAG_MS {
-            self.potential_profit_percent = self.price_diff_percent.abs() - TOTAL_COST_PERCENT;
-            self.is_scalping_opportunity = self.potential_profit_percent > MIN_IMPULSE_PERCENT;
+        // Анализ возможности скальпинга с учётом всех задержек
+        if let Some(decision) = self.decision_maker.make_decision() {
+            self.is_scalping_opportunity = decision.should_trade;
+            self.potential_profit_percent = decision.predicted_profit_percent;
         } else {
             self.is_scalping_opportunity = false;
             self.potential_profit_percent = 0.0;
@@ -176,6 +182,24 @@ impl PriceState {
         let mexc_age = now - self.mexc_timestamp;
         
         self.is_stale = binance_age > timeout_ms as i64 || mexc_age > timeout_ms as i64;
+    }
+    
+    /// Возвращает информацию о калибровке
+    pub fn get_calibration_info(&self) -> String {
+        format!(
+            "TimeSync calibrated: {}",
+            self.time_sync.is_calibrated()
+        )
+    }
+    
+    /// Возвращает анализ возможности арбитража (теперь в ImpulseStrategy)
+    pub fn get_arbitrage_analysis(&self) -> String {
+        format!(
+            "Spread: {:.3}% | Lag: {}ms | Opportunity: {}",
+            self.spread,
+            self.mexc_lag_ms,
+            if self.is_scalping_opportunity { "YES" } else { "NO" }
+        )
     }
 }
 

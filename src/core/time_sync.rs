@@ -33,14 +33,14 @@ impl TimeSync {
     
     /// Обновляет синхронизацию для Binance
     pub fn update_binance(&mut self, exchange_ts: i64, local_received: i64) {
-        // Вычисляем смещение: exchange_ts - (local_received - network_delay)
-        // Предполагаем что exchange_ts это время когда сделка произошла на бирже
-        // local_received это когда мы получили данные
-        // Разница = смещение часов + сетевая задержка
+        // Вычисляем задержку сети: local_received - exchange_ts
+        // exchange_ts - время когда сделка произошла на бирже
+        // local_received - когда мы получили данные локально
+        // network_delay = local_received - exchange_ts (положительное число)
         
-        let offset = exchange_ts - local_received;
+        let network_delay = local_received - exchange_ts;
         
-        self.binance_samples.push_back(offset);
+        self.binance_samples.push_back(network_delay);
         if self.binance_samples.len() > 100 {
             self.binance_samples.pop_front();
         }
@@ -53,9 +53,9 @@ impl TimeSync {
     
     /// Обновляет синхронизацию для MEXC
     pub fn update_mexc(&mut self, exchange_ts: i64, local_received: i64) {
-        let offset = exchange_ts - local_received;
+        let network_delay = local_received - exchange_ts;
         
-        self.mexc_samples.push_back(offset);
+        self.mexc_samples.push_back(network_delay);
         if self.mexc_samples.len() > 100 {
             self.mexc_samples.pop_front();
         }
@@ -72,11 +72,14 @@ impl TimeSync {
         
         let median = sorted[sorted.len() / 2];
         
-        // Оцениваем сетевую задержку (минимальное значение близко к RTT/2)
-        let min_offset = sorted[0];
-        self.binance_network_delay = (median - min_offset).max(10).min(500);
+        // Сетевая задержка = минимальная измеренная задержка (RTT/2)
+        let min_delay = sorted[0];
+        self.binance_network_delay = min_delay.max(10).min(500);
         
-        // Смещение часов = медиана - сетевая задержка
+        // Смещение часов = медиана задержек минус сетевая задержка
+        // clock_offset показывает системное смещение часов биржи
+        // Если median = 50ms, min_delay = 30ms, то clock_offset = 20ms
+        // Это означает: local_time = exchange_ts + 20ms
         self.binance_clock_offset = median - self.binance_network_delay;
         
         if !self.calibrated && self.mexc_samples.len() >= 20 {
@@ -90,9 +93,9 @@ impl TimeSync {
         sorted.sort_unstable();
         
         let median = sorted[sorted.len() / 2];
-        let min_offset = sorted[0];
+        let min_delay = sorted[0];
         
-        self.mexc_network_delay = (median - min_offset).max(10).min(500);
+        self.mexc_network_delay = min_delay.max(10).min(500);
         self.mexc_clock_offset = median - self.mexc_network_delay;
         
         if !self.calibrated && self.binance_samples.len() >= 20 {
@@ -102,12 +105,12 @@ impl TimeSync {
     
     /// Конвертирует timestamp Binance в локальное время
     pub fn binance_to_local(&self, exchange_ts: i64) -> i64 {
-        exchange_ts - self.binance_clock_offset
+        exchange_ts + self.binance_clock_offset
     }
     
     /// Конвертирует timestamp MEXC в локальное время
     pub fn mexc_to_local(&self, exchange_ts: i64) -> i64 {
-        exchange_ts - self.mexc_clock_offset
+        exchange_ts + self.mexc_clock_offset
     }
     
     /// Вычисляет реальную задержку MEXC относительно Binance
@@ -115,7 +118,7 @@ impl TimeSync {
     pub fn calculate_mexc_lag(&self, binance_ts: i64, mexc_ts: i64) -> i64 {
         if !self.calibrated {
             // Если не откалиброваны, используем сырую разницу
-            return binance_ts - mexc_ts;
+            return mexc_ts - binance_ts;  // Изменено: mexc - binance
         }
         
         // Конвертируем оба timestamp'а в локальное время
@@ -123,7 +126,8 @@ impl TimeSync {
         let mexc_local = self.mexc_to_local(mexc_ts);
         
         // Разница показывает насколько MEXC отстаёт от Binance
-        binance_local - mexc_local
+        // Если MEXC отстаёт, его сделка происходит ПОЗЖЕ в реальном времени
+        mexc_local - binance_local  // Изменено: mexc - binance
     }
     
     pub fn is_calibrated(&self) -> bool {

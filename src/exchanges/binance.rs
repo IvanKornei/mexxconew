@@ -1,4 +1,4 @@
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::time::{sleep, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -6,7 +6,7 @@ use tracing::{error, info, warn};
 use fast_float::parse;
 
 use crate::core::CircuitBreaker;
-use crate::utils::{ConnectionError, Result};
+use crate::utils::{ConnectionError, Result, HealthChecker};
 
 #[derive(Debug, Deserialize)]
 struct BinanceAggTrade {
@@ -20,6 +20,7 @@ pub struct BinanceFuturesConnector {
     url: String,
     max_reconnect_attempts: u32,
     circuit_breaker: CircuitBreaker,
+    health_checker: Option<HealthChecker>,
 }
 
 impl BinanceFuturesConnector {
@@ -28,7 +29,14 @@ impl BinanceFuturesConnector {
             url,
             max_reconnect_attempts: 5,
             circuit_breaker: CircuitBreaker::new(Default::default()),
+            health_checker: None,
         }
+    }
+    
+    /// Устанавливает health checker для мониторинга
+    pub fn with_health_checker(mut self, checker: HealthChecker) -> Self {
+        self.health_checker = Some(checker);
+        self
     }
     
     pub async fn connect_and_stream<F>(&self, mut callback: F) -> Result<()>
@@ -77,46 +85,100 @@ impl BinanceFuturesConnector {
     {
         info!("Connecting to Binance Futures: {}", self.url);
         
-        let (ws_stream, _) = connect_async(&self.url).await?;
+        // Добавляем таймаут на подключение (10 секунд)
+        let connect_timeout = Duration::from_secs(10);
+        let (ws_stream, _) = tokio::time::timeout(
+            connect_timeout,
+            connect_async(&self.url)
+        ).await
+            .map_err(|_| ConnectionError::Timeout { 
+                operation: "connect".to_string(),
+                timeout_ms: connect_timeout.as_millis() as u64 
+            })??;
         info!("Connected to Binance Futures");
         
-        let (mut _write, mut read) = ws_stream.split();
+        let (write, mut read) = ws_stream.split();
         
-        while let Some(msg) = read.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    // SIMD-accelerated JSON parsing for HFT
-                    let mut bytes = text.into_bytes();
-                    if let Ok(trade) = simd_json::from_slice::<BinanceAggTrade>(&mut bytes) {
-                        // Fast float parsing - 10x faster than std
-                        if let Ok(price) = parse::<f64, _>(&trade.price) {
-                            callback(price, trade.trade_time);
-                        }
-                    }
-                }
-                Ok(Message::Binary(data)) => {
-                    info!("📦 Binance Binary: {} bytes", data.len());
-                }
-                Ok(Message::Ping(_)) => {
-                    info!("🏓 Binance Ping");
-                }
-                Ok(Message::Pong(_)) => {
-                    info!("🏓 Binance Pong");
-                }
-                Ok(Message::Close(_)) => {
-                    warn!("Binance WebSocket closed");
+        // Shared write access for pong responses
+        let write_shared = std::sync::Arc::new(tokio::sync::Mutex::new(write));
+        
+        // Create bounded channel for pong responses
+        let (pong_tx, mut pong_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let write_pong = write_shared.clone();
+        
+        // Spawn pong handler task
+        let pong_handle = tokio::spawn(async move {
+            while let Some(data) = pong_rx.recv().await {
+                let mut write = write_pong.lock().await;
+                if write.send(Message::Pong(data)).await.is_err() {
                     break;
                 }
-                Err(e) => {
-                    error!("Binance WebSocket error: {}", e);
-                    return Err(e.into());
-                }
-                _ => {
-                    info!("❓ Binance unknown message type");
+            }
+        });
+        
+        // Pre-allocate reusable buffer for JSON parsing (HFT optimization)
+        let mut parse_buffer = Vec::with_capacity(4096);
+        
+        // Main message processing loop
+        let result: Result<()> = async {
+            while let Some(msg) = read.next().await {
+                match msg {
+                    Ok(Message::Text(text)) => {
+                        // Валидация размера сообщения (защита от DoS)
+                        if text.len() > 10_000 {
+                            error!("Message too large: {} bytes", text.len());
+                            continue;
+                        }
+                        
+                        // Отправляем heartbeat при получении данных
+                        if let Some(ref checker) = self.health_checker {
+                            checker.heartbeat();
+                        }
+                        
+                        // Reuse buffer to avoid allocations
+                        parse_buffer.clear();
+                        parse_buffer.extend_from_slice(text.as_bytes());
+                        
+                        // SIMD-accelerated JSON parsing for HFT
+                        if let Ok(trade) = simd_json::from_slice::<BinanceAggTrade>(&mut parse_buffer) {
+                            // Fast float parsing - 10x faster than std
+                            if let Ok(price) = parse::<f64, _>(&trade.price) {
+                                callback(price, trade.trade_time);
+                            }
+                        }
+                    }
+                    Ok(Message::Binary(data)) => {
+                        // Binary messages are rare, log at debug level
+                        tracing::debug!("Binance Binary: {} bytes", data.len());
+                    }
+                    Ok(Message::Ping(data)) => {
+                        // Send pong via bounded channel to prevent unbounded task spawning
+                        // If channel is full, drop the pong (exchange will retry)
+                        let _ = pong_tx.try_send(data);
+                    }
+                    Ok(Message::Pong(_)) => {
+                        // Pong received - no action needed (hot path)
+                    }
+                    Ok(Message::Close(frame)) => {
+                        warn!("Binance WebSocket closed: {:?}", frame);
+                        break;
+                    }
+                    Err(e) => {
+                        error!("Binance WebSocket error: {}", e);
+                        return Err(e.into());
+                    }
+                    _ => {
+                        // Unknown message types are rare
+                        tracing::debug!("Binance unknown message type");
+                    }
                 }
             }
-        }
+            
+            Ok(())
+        }.await;
         
-        Ok(())
+        // Always cleanup pong handler task
+        pong_handle.abort();
+        result
     }
 }

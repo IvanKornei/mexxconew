@@ -31,6 +31,9 @@ pub enum ConnectionError {
     
     #[error("Reconnection failed after {attempts} attempts")]
     ReconnectFailed { attempts: u32 },
+    
+    #[error("Operation '{operation}' timed out after {timeout_ms}ms")]
+    Timeout { operation: String, timeout_ms: u64 },
 }
 
 #[derive(Debug, Error)]

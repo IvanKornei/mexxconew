@@ -1,13 +1,15 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::info;
 
-use crate::core::trading_strategy::{ImpulseStrategy, Position, PositionStatus, PositionSide};
+use crate::core::trading_strategy::{ImpulseStrategy, Position};
 use crate::core::capital_manager::CapitalManager;
 use crate::core::{TradingStats, TradeRecord};
 use crate::core::PriceState;
+use crate::utils::LatencyMetrics;
 
 /// Менеджер позиций с управлением капиталом
 pub struct PositionManager {
@@ -17,6 +19,10 @@ pub struct PositionManager {
     capital_manager: Arc<RwLock<CapitalManager>>,
     max_positions: Arc<RwLock<usize>>,
     active_count: Arc<AtomicUsize>,
+    
+    // Метрики производительности
+    market_state_metrics: Arc<LatencyMetrics>,
+    position_update_metrics: Arc<LatencyMetrics>,
 }
 
 impl PositionManager {
@@ -33,20 +39,31 @@ impl PositionManager {
             capital_manager: Arc::new(RwLock::new(capital_manager)),
             max_positions: Arc::new(RwLock::new(max_positions)),
             active_count: Arc::new(AtomicUsize::new(0)),
+            market_state_metrics: Arc::new(LatencyMetrics::new()),
+            position_update_metrics: Arc::new(LatencyMetrics::new()),
         }
     }
     
     pub async fn process_market_state(&self, state: &PriceState) {
-        // Обновляем стратегию
+        // Начинаем измерение производительности
+        let start = Instant::now();
+        
+        // Обновляем стратегию БЕЗ долгой блокировки
+        // Копируем данные для минимизации времени под блокировкой
+        let binance_price = state.binance;
+        let mexc_price = state.mexc;
+        let binance_ts = state.binance_timestamp;
+        let mexc_ts = state.mexc_timestamp;
+        let lag = state.mexc_lag_ms;
+        
         {
             let mut strategy = self.strategy.write().await;
-            strategy.update_binance_price(state.binance, state.binance_timestamp);
-            strategy.update_mexc_price(state.mexc, state.mexc_timestamp);
-            // Используем mexc_lag_ms (синхронизированный лаг)
-            strategy.update_lag_stats(state.mexc_lag_ms);
+            strategy.update_binance_price(binance_price, binance_ts);
+            strategy.update_mexc_price(mexc_price, mexc_ts);
+            strategy.update_lag_stats(lag);
         }
         
-        // Обновляем позиции
+        // Обновляем позиции - создаём snapshot для избежания race condition
         let positions_to_update: Vec<(String, Position)> = {
             let positions = self.positions.read().await;
             positions.iter().map(|(id, pos)| (id.clone(), pos.clone())).collect()
@@ -56,8 +73,13 @@ impl PositionManager {
         let mut to_save = Vec::new();
         
         for (id, mut position) in positions_to_update {
+            let update_start = Instant::now();
+            
             let strategy = self.strategy.read().await;
             let should_close = strategy.update_position(&mut position, state.mexc);
+            
+            // Записываем метрику обновления позиции
+            self.position_update_metrics.record(update_start);
             
             if should_close {
                 // PnL в USD (разница цен * количество BTC)
@@ -210,6 +232,9 @@ impl PositionManager {
                 self.active_count.fetch_sub(1, Ordering::SeqCst);
             }
         }
+        
+        // Записываем общую метрику обработки market state
+        self.market_state_metrics.record(start);
     }
     
     pub async fn get_open_positions(&self) -> Vec<Position> {
@@ -231,19 +256,14 @@ impl PositionManager {
         }
     }
     
-    pub fn get_trading_stats(&self) -> Option<TradingStats> {
-        // Используем tokio::runtime для синхронного доступа
-        let trades = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.closed_trades.read())
-        });
+    pub async fn get_trading_stats(&self) -> Option<TradingStats> {
+        let trades = self.closed_trades.read().await;
         
         if trades.is_empty() {
             return None;
         }
         
-        let capital = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.capital_manager.read())
-        });
+        let capital = self.capital_manager.read().await;
         
         let total_trades = trades.len() as i64;
         let winning_trades = trades.iter().filter(|t| t.pnl > 0.0).count() as i64;
@@ -269,17 +289,13 @@ impl PositionManager {
         })
     }
     
-    pub fn get_recent_trades(&self, limit: i64) -> Vec<TradeRecord> {
-        let trades = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.closed_trades.read())
-        });
+    pub async fn get_recent_trades(&self, limit: i64) -> Vec<TradeRecord> {
+        let trades = self.closed_trades.read().await;
         trades.iter().take(limit as usize).cloned().collect()
     }
     
-    pub fn get_current_balance(&self) -> f64 {
-        let capital = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.capital_manager.read())
-        });
+    pub async fn get_current_balance(&self) -> f64 {
+        let capital = self.capital_manager.read().await;
         capital.get_current_capital()
     }
     
@@ -333,6 +349,22 @@ impl PositionManager {
     pub async fn get_strategy_settings(&self) -> crate::core::trading_strategy::StrategySettings {
         let strategy = self.strategy.read().await;
         strategy.get_settings()
+    }
+    
+    /// Получить метрики производительности обработки market state
+    pub fn get_market_state_metrics(&self) -> crate::utils::MetricsSnapshot {
+        self.market_state_metrics.snapshot()
+    }
+    
+    /// Получить метрики производительности обновления позиций
+    pub fn get_position_update_metrics(&self) -> crate::utils::MetricsSnapshot {
+        self.position_update_metrics.snapshot()
+    }
+    
+    /// Сбросить метрики производительности
+    pub fn reset_metrics(&self) {
+        self.market_state_metrics.reset();
+        self.position_update_metrics.reset();
     }
 }
 
