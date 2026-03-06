@@ -7,6 +7,7 @@ import { HistoryTableComponent } from './components/history-table.component';
 import { PositionsPanelComponent } from './components/positions-panel.component';
 import { TradingSettingsComponent, TradingSettings } from './components/trading-settings.component';
 import { TradingStatsComponent } from './components/trading-stats.component';
+import { ControlPanelComponent } from './components/control-panel.component';
 
 @Component({
   selector: 'app-root',
@@ -18,7 +19,8 @@ import { TradingStatsComponent } from './components/trading-stats.component';
     HistoryTableComponent, 
     PositionsPanelComponent,
     TradingSettingsComponent,
-    TradingStatsComponent
+    TradingStatsComponent,
+    ControlPanelComponent
   ],
   template: `
     <div class="min-h-screen bg-slate-900 p-8">
@@ -32,6 +34,9 @@ import { TradingStatsComponent } from './components/trading-stats.component';
             BTC/USDT Spread Monitoring - Binance Futures vs MEXC Futures
           </p>
         </div>
+        
+        <!-- Control Panel -->
+        <app-control-panel></app-control-panel>
         
         <!-- Main Grid -->
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">

@@ -58,6 +58,25 @@ export interface TradeRecord {
   initial_impulse: number;
 }
 
+export interface SystemState {
+  is_running: boolean;
+  mode: string;
+  last_updated: number;
+  trading_settings: {
+    capital: number;
+    position_size_percent: number;
+    leverage: number;
+    max_positions: number;
+    momentum_threshold: number;
+    quick_exit_timeout: number;
+    take_profit_percent: number;
+    stop_loss_percent: number;
+    momentum_weight: number;
+    lag_weight: number;
+    price_diff_weight: number;
+  };
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -68,6 +87,9 @@ export class MarketDataService {
   private positionsSubject = new Subject<Position[]>();
   private tradingStatsSubject = new Subject<TradingStats | null>();
   private recentTradesSubject = new Subject<TradeRecord[]>();
+  private systemStateSubject = new Subject<SystemState | null>();
+  
+  public systemState$ = this.systemStateSubject.asObservable();
   
   private history: MarketData[] = [];
   private positions: Position[] = [];
@@ -143,32 +165,52 @@ export class MarketDataService {
     
     this.ws.onmessage = (event) => {
       try {
-        const data: MarketData = JSON.parse(event.data);
-        this.dataSubject.next(data);
+        const data = JSON.parse(event.data);
+        
+        // Проверяем тип сообщения
+        if (data.type === 'systemState') {
+          // Обновление состояния системы
+          this.systemStateSubject.next({
+            is_running: data.is_running,
+            mode: data.mode,
+            last_updated: data.last_updated,
+            trading_settings: data.trading_settings
+          });
+          return;
+        }
+        
+        if (data.type === 'error') {
+          console.error('Server error:', data.message);
+          return;
+        }
+        
+        // Обычное сообщение с данными рынка
+        const marketData: MarketData = data;
+        this.dataSubject.next(marketData);
         
         // Обновляем позиции если они пришли
-        if (data.positions) {
-          this.positions = data.positions;
+        if (marketData.positions) {
+          this.positions = marketData.positions;
           this.positionsSubject.next([...this.positions]);
         }
         
         // Обновляем статистику из базы данных
-        if (data.trading_stats) {
-          this.tradingStatsSubject.next(data.trading_stats);
+        if (marketData.trading_stats) {
+          this.tradingStatsSubject.next(marketData.trading_stats);
         }
         
         // Обновляем историю сделок
-        if (data.recent_trades) {
-          this.recentTradesSubject.next(data.recent_trades);
+        if (marketData.recent_trades) {
+          this.recentTradesSubject.next(marketData.recent_trades);
         }
         
-        this.history.unshift(data);
+        this.history.unshift(marketData);
         if (this.history.length > this.MAX_HISTORY) {
           this.history.pop();
         }
         this.historySubject.next([...this.history]);
         
-        this.processMarketData(data);
+        this.processMarketData(marketData);
       } catch (error) {
         console.error('Failed to parse WebSocket message:', error);
       }
@@ -298,6 +340,41 @@ export class MarketDataService {
     if (this.ws) {
       this.ws.close();
       this.ws = null;
+    }
+  }
+  
+  // Методы управления системой
+  startTrading(): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      const command = { type: 'startTrading' };
+      this.ws.send(JSON.stringify(command));
+      console.log('Start trading command sent');
+    }
+  }
+  
+  stopTrading(): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      const command = { type: 'stopTrading' };
+      this.ws.send(JSON.stringify(command));
+      console.log('Stop trading command sent');
+    }
+  }
+  
+  switchMode(mode: 'Emulation' | 'Live'): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      const command = { 
+        type: 'switchMode',
+        mode: mode.toLowerCase()
+      };
+      this.ws.send(JSON.stringify(command));
+      console.log('Switch mode command sent:', mode);
+    }
+  }
+  
+  getSystemState(): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      const command = { type: 'getSystemState' };
+      this.ws.send(JSON.stringify(command));
     }
   }
 }

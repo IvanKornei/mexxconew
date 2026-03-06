@@ -10,6 +10,8 @@ use crate::core::capital_manager::CapitalManager;
 use crate::core::{TradingStats, TradeRecord};
 use crate::core::PriceState;
 use crate::utils::LatencyMetrics;
+use crate::core::system_manager_optimized::TradingMode;
+use crate::core::trading_mode_manager::TradingModeManager;
 
 /// Менеджер позиций с управлением капиталом
 pub struct PositionManager {
@@ -19,6 +21,13 @@ pub struct PositionManager {
     capital_manager: Arc<RwLock<CapitalManager>>,
     max_positions: Arc<RwLock<usize>>,
     active_count: Arc<AtomicUsize>,
+    
+    // Управление торговлей
+    is_trading_enabled: Arc<RwLock<bool>>,
+    execution_mode: Arc<RwLock<TradingMode>>,
+    
+    // Менеджер режимов торговли
+    trading_mode_manager: Arc<RwLock<Option<Arc<TradingModeManager>>>>,
     
     // Метрики производительности
     market_state_metrics: Arc<LatencyMetrics>,
@@ -39,12 +48,32 @@ impl PositionManager {
             capital_manager: Arc::new(RwLock::new(capital_manager)),
             max_positions: Arc::new(RwLock::new(max_positions)),
             active_count: Arc::new(AtomicUsize::new(0)),
+            is_trading_enabled: Arc::new(RwLock::new(false)),
+            execution_mode: Arc::new(RwLock::new(TradingMode::Emulation)),
+            trading_mode_manager: Arc::new(RwLock::new(None)),
             market_state_metrics: Arc::new(LatencyMetrics::new()),
             position_update_metrics: Arc::new(LatencyMetrics::new()),
         }
     }
     
+    /// Устанавливает TradingModeManager для записи сделок в правильную БД
+    pub async fn set_trading_mode_manager(&self, manager: Arc<TradingModeManager>) {
+        *self.trading_mode_manager.write().await = Some(manager);
+        info!("📊 Trading mode manager connected to position manager");
+    }
+    
     pub async fn process_market_state(&self, state: &PriceState) {
+        // ПРОВЕРКА: Если торговля отключена, игнорируем все сигналы
+        let is_enabled = *self.is_trading_enabled.read().await;
+        if !is_enabled {
+            // Логируем только первый раз чтобы не спамить
+            static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                info!("⏸️ Trading is disabled, ignoring market signals");
+            }
+            return;
+        }
+        
         // Начинаем измерение производительности
         let start = Instant::now();
         
@@ -94,7 +123,14 @@ impl PositionManager {
                     pnl, pnl_percent, position.status, duration_ms
                 );
                 
-                // Сохраняем в память
+                // Записываем сделку через TradingModeManager если он подключен
+                let mode_manager = self.trading_mode_manager.read().await;
+                if let Some(ref manager) = *mode_manager {
+                    manager.record_trade(&position, position.current_price, pnl, pnl_percent).await;
+                }
+                drop(mode_manager);
+                
+                // Сохраняем в память (для обратной совместимости)
                 let trade = TradeRecord {
                     id: 0,
                     position_id: position.id.clone(),
@@ -219,11 +255,27 @@ impl PositionManager {
                 );
                 
                 let capital = self.capital_manager.read().await;
-                info!(
-                    "🚀 OPENED | {} | {:?} | Entry: {:.2} | Size: {:.6} BTC | Capital: ${:.2} | AvgLag: {}ms",
-                    position.id, side, position.entry_price, position_size_btc,
-                    capital.get_current_capital(), avg_lag
-                );
+                
+                // Проверяем режим выполнения
+                let execution_mode = *self.execution_mode.read().await;
+                match execution_mode {
+                    TradingMode::Emulation => {
+                        info!(
+                            "🚀 OPENED (EMULATION) | {} | {:?} | Entry: {:.2} | Size: {:.6} BTC | Capital: ${:.2} | AvgLag: {}ms",
+                            position.id, side, position.entry_price, position_size_btc,
+                            capital.get_current_capital(), avg_lag
+                        );
+                    }
+                    TradingMode::Live => {
+                        info!(
+                            "🚀 OPENED (LIVE) | {} | {:?} | Entry: {:.2} | Size: {:.6} BTC | Capital: ${:.2} | AvgLag: {}ms",
+                            position.id, side, position.entry_price, position_size_btc,
+                            capital.get_current_capital(), avg_lag
+                        );
+                        // TODO: Здесь будет интеграция с Exchange API для отправки реальных ордеров
+                        // self.execute_real_order(&position).await?;
+                    }
+                }
                 
                 let mut positions = self.positions.write().await;
                 positions.insert(position.id.clone(), position);
@@ -365,6 +417,28 @@ impl PositionManager {
     pub fn reset_metrics(&self) {
         self.market_state_metrics.reset();
         self.position_update_metrics.reset();
+    }
+    
+    /// Устанавливает флаг активности торговли
+    pub async fn set_trading_enabled(&self, enabled: bool) {
+        *self.is_trading_enabled.write().await = enabled;
+        info!("🔧 Trading enabled set to: {}", enabled);
+    }
+    
+    /// Проверяет активна ли торговля
+    pub async fn is_trading_enabled(&self) -> bool {
+        *self.is_trading_enabled.read().await
+    }
+    
+    /// Устанавливает режим выполнения (Emulation/Live)
+    pub async fn set_execution_mode(&self, mode: TradingMode) {
+        *self.execution_mode.write().await = mode;
+        info!("Execution mode set to: {:?}", mode);
+    }
+    
+    /// Возвращает текущий режим выполнения
+    pub async fn get_execution_mode(&self) -> TradingMode {
+        *self.execution_mode.read().await
     }
 }
 

@@ -12,6 +12,8 @@ pub mod time_sync;
 pub mod price_matcher;
 pub mod price_synchronizer;
 pub mod arbitrage_decision;
+pub mod system_manager_optimized;
+pub mod trading_mode_manager;
 
 pub use state::PriceState;
 pub use price_feed::PriceFeedManager;
@@ -21,3 +23,5 @@ pub use position_manager::PositionManager;
 pub use trading_history::{TradingStats, TradeRecord};
 pub use time_sync::TimeSync;
 pub use ring_buffer::{RingBuffer, PriceSnapshot};
+pub use system_manager_optimized::{SystemManager, TradingMode, SystemState, TradingSettings};
+pub use trading_mode_manager::TradingModeManager;

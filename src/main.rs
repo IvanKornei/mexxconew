@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::api::WsServer;
-use crate::core::PriceFeedManager;
+use crate::core::{PriceFeedManager, SystemManager, TradingModeManager};
 use crate::utils::{Config, SystemHealth, HealthChecker};
 
 #[tokio::main]
@@ -61,8 +61,40 @@ async fn main() -> anyhow::Result<()> {
     
     info!("✅ Price feed manager initialized");
     
-    // Create WebSocket server with position manager and health monitoring
-    let ws_server = WsServer::new(state_rx, position_manager)
+    // Create trading mode manager for separate emulation/live databases
+    let trading_mode_manager = Arc::new(
+        TradingModeManager::new(config.trading.initial_capital)
+            .expect("Failed to create trading mode manager")
+    );
+    info!("✅ Trading mode manager initialized");
+    
+    // Connect trading mode manager to position manager
+    position_manager.set_trading_mode_manager(trading_mode_manager.clone()).await;
+    
+    // Create system manager for state persistence and control
+    let system_manager = Arc::new(SystemManager::new(position_manager.clone()));
+    
+    // Load saved state (settings, mode, running status)
+    match system_manager.load_state().await {
+        Ok(state) => {
+            info!("✅ System state loaded: running={}, mode={:?}", state.is_running, state.mode);
+            
+            // Apply loaded settings to position manager
+            system_manager.update_settings(state.trading_settings).await
+                .expect("Failed to apply loaded settings");
+            
+            // Warning if system was running in Live mode
+            if state.is_running && state.mode == crate::core::TradingMode::Live {
+                tracing::warn!("⚠️ System was running in LIVE mode. Confirm to continue or stop trading.");
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load system state: {}. Using defaults.", e);
+        }
+    }
+    
+    // Create WebSocket server with position manager, system manager and health monitoring
+    let ws_server = WsServer::new(state_rx, position_manager, system_manager)
         .with_health(system_health.clone());
     let app = ws_server.router();
     

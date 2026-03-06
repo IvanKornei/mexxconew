@@ -1,0 +1,18 @@
+{
+  "is_running": true,
+  "mode": "Emulation",
+  "last_updated": 1772765745317,
+  "trading_settings": {
+    "capital": 100.0,
+    "position_size_percent": 10.0,
+    "leverage": 200.0,
+    "max_positions": 2,
+    "momentum_threshold": 0.03,
+    "quick_exit_timeout": 2000,
+    "take_profit_percent": 0.04,
+    "stop_loss_percent": 0.02,
+    "momentum_weight": 0.6,
+    "lag_weight": 0.3,
+    "price_diff_weight": 0.1
+  }
+}

@@ -15,7 +15,7 @@ use tracing::{error, info};
 use serde::{Serialize, Deserialize};
 use std::sync::Arc;
 
-use crate::core::{PriceState, PositionManager, Position, TradingStats, TradeRecord};
+use crate::core::{PriceState, PositionManager, Position, TradingStats, TradeRecord, SystemManager, TradingMode};
 use crate::core::trading_strategy::StrategySettings;
 use crate::utils::{SystemHealth};
 
@@ -34,6 +34,14 @@ enum ClientCommand {
         leverage: f64,
         max_positions: usize,
     },
+    #[serde(rename = "startTrading")]
+    StartTrading,
+    #[serde(rename = "stopTrading")]
+    StopTrading,
+    #[serde(rename = "switchMode")]
+    SwitchMode { mode: String },
+    #[serde(rename = "getSystemState")]
+    GetSystemState,
 }
 
 /// Ответы сервера
@@ -42,6 +50,17 @@ enum ClientCommand {
 enum ServerResponse {
     #[serde(rename = "settings")]
     Settings(StrategySettings),
+    #[serde(rename = "systemState")]
+    SystemState {
+        is_running: bool,
+        mode: String,
+        last_updated: i64,
+        trading_settings: crate::core::TradingSettings,
+    },
+    #[serde(rename = "error")]
+    Error { message: String },
+    #[serde(rename = "confirmationRequired")]
+    ConfirmationRequired { action: String, message: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,14 +78,20 @@ pub struct WsMessage {
 pub struct WsServer {
     state_rx: watch::Receiver<PriceState>,
     position_manager: Arc<PositionManager>,
+    system_manager: Arc<SystemManager>,
     system_health: Option<Arc<SystemHealth>>,
 }
 
 impl WsServer {
-    pub fn new(state_rx: watch::Receiver<PriceState>, position_manager: Arc<PositionManager>) -> Self {
+    pub fn new(
+        state_rx: watch::Receiver<PriceState>, 
+        position_manager: Arc<PositionManager>,
+        system_manager: Arc<SystemManager>,
+    ) -> Self {
         Self { 
             state_rx,
             position_manager,
+            system_manager,
             system_health: None,
         }
     }
@@ -89,7 +114,7 @@ impl WsServer {
             .route("/ws", get(ws_handler))
             .route("/health", get(move || health_handler(health)))
             .route("/health/detailed", get(move || detailed_health_handler(self.system_health.clone())))
-            .with_state((self.state_rx, self.position_manager))
+            .with_state((self.state_rx, self.position_manager, self.system_manager))
             .layer(cors)
     }
 }
@@ -125,15 +150,20 @@ async fn detailed_health_handler(health: Option<Arc<SystemHealth>>) -> Json<serd
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
-    State((state_rx, position_manager)): State<(watch::Receiver<PriceState>, Arc<PositionManager>)>,
+    State((state_rx, position_manager, system_manager)): State<(
+        watch::Receiver<PriceState>, 
+        Arc<PositionManager>,
+        Arc<SystemManager>,
+    )>,
 ) -> Response {
-    ws.on_upgrade(|socket| handle_socket(socket, state_rx, position_manager))
+    ws.on_upgrade(|socket| handle_socket(socket, state_rx, position_manager, system_manager))
 }
 
 async fn handle_socket(
     socket: WebSocket, 
     mut state_rx: watch::Receiver<PriceState>,
     position_manager: Arc<PositionManager>,
+    system_manager: Arc<SystemManager>,
 ) {
     let (mut sender, mut receiver) = socket.split();
     
@@ -142,11 +172,12 @@ async fn handle_socket(
     // Канал для отправки дополнительных сообщений (например, ответов на команды)
     let (response_tx, mut response_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     
-    // Клонируем position_manager для разных задач
+    // Клонируем для разных задач
     let position_manager_send = position_manager.clone();
     let position_manager_recv = position_manager.clone();
+    let system_manager_recv = system_manager.clone();
     
-    // Send initial state with positions
+    // Send initial state with positions AND system state
     let initial_msg = {
         let state = state_rx.borrow_and_update().clone();
         let positions = position_manager.get_open_positions().await;
@@ -168,6 +199,18 @@ async fn handle_socket(
         if sender.send(Message::Text(json)).await.is_err() {
             return;
         }
+    }
+    
+    // Send initial system state
+    let system_state = system_manager.get_state().await;
+    let system_state_msg = ServerResponse::SystemState {
+        is_running: system_state.is_running,
+        mode: format!("{:?}", system_state.mode),
+        last_updated: system_state.last_updated,
+        trading_settings: system_state.trading_settings,
+    };
+    if let Ok(json) = serde_json::to_string(&system_state_msg) {
+        let _ = sender.send(Message::Text(json)).await;
     }
     
     // Spawn task to send updates with throttling
@@ -246,6 +289,7 @@ async fn handle_socket(
                                         continue;
                                     }
                                     
+                                    // Обновляем настройки в position manager
                                     position_manager_recv.update_strategy_settings(
                                         settings.momentum_weight,
                                         settings.lag_weight,
@@ -253,6 +297,19 @@ async fn handle_socket(
                                         settings.momentum_threshold,
                                         settings.quick_exit_timeout_ms,
                                     ).await;
+                                    
+                                    // Получаем текущие настройки и сохраняем через system manager
+                                    let current_state = system_manager_recv.get_state().await;
+                                    let mut updated_settings = current_state.trading_settings;
+                                    updated_settings.momentum_weight = settings.momentum_weight;
+                                    updated_settings.lag_weight = settings.lag_weight;
+                                    updated_settings.price_diff_weight = settings.price_diff_weight;
+                                    updated_settings.momentum_threshold = settings.momentum_threshold;
+                                    updated_settings.quick_exit_timeout = settings.quick_exit_timeout_ms;
+                                    
+                                    if let Err(e) = system_manager_recv.update_settings(updated_settings).await {
+                                        error!("Failed to save settings: {}", e);
+                                    }
                                 }
                                 ClientCommand::GetSettings => {
                                     // Отправляем текущие настройки обратно
@@ -268,12 +325,123 @@ async fn handle_socket(
                                         continue;
                                     }
                                     
+                                    // Обновляем настройки в position manager
                                     position_manager_recv.update_capital_settings(
                                         capital,
                                         position_size_percent,
                                         leverage,
                                         max_positions,
                                     ).await;
+                                    
+                                    // Получаем текущие настройки и сохраняем через system manager
+                                    let current_state = system_manager_recv.get_state().await;
+                                    let mut updated_settings = current_state.trading_settings;
+                                    updated_settings.capital = capital;
+                                    updated_settings.position_size_percent = position_size_percent;
+                                    updated_settings.leverage = leverage;
+                                    updated_settings.max_positions = max_positions;
+                                    
+                                    if let Err(e) = system_manager_recv.update_settings(updated_settings).await {
+                                        error!("Failed to save settings: {}", e);
+                                    }
+                                }
+                                ClientCommand::StartTrading => {
+                                    match system_manager_recv.start_trading().await {
+                                        Ok(_) => {
+                                            let state = system_manager_recv.get_state().await;
+                                            let msg = ServerResponse::SystemState {
+                                                is_running: state.is_running,
+                                                mode: format!("{:?}", state.mode),
+                                                last_updated: state.last_updated,
+                                                trading_settings: state.trading_settings,
+                                            };
+                                            if let Ok(json) = serde_json::to_string(&msg) {
+                                                let _ = response_tx.send(json);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            let msg = ServerResponse::Error {
+                                                message: format!("Failed to start trading: {}", e),
+                                            };
+                                            if let Ok(json) = serde_json::to_string(&msg) {
+                                                let _ = response_tx.send(json);
+                                            }
+                                        }
+                                    }
+                                }
+                                ClientCommand::StopTrading => {
+                                    match system_manager_recv.stop_trading().await {
+                                        Ok(_) => {
+                                            let state = system_manager_recv.get_state().await;
+                                            let msg = ServerResponse::SystemState {
+                                                is_running: state.is_running,
+                                                mode: format!("{:?}", state.mode),
+                                                last_updated: state.last_updated,
+                                                trading_settings: state.trading_settings,
+                                            };
+                                            if let Ok(json) = serde_json::to_string(&msg) {
+                                                let _ = response_tx.send(json);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            let msg = ServerResponse::Error {
+                                                message: format!("Failed to stop trading: {}", e),
+                                            };
+                                            if let Ok(json) = serde_json::to_string(&msg) {
+                                                let _ = response_tx.send(json);
+                                            }
+                                        }
+                                    }
+                                }
+                                ClientCommand::SwitchMode { mode } => {
+                                    let trading_mode = match mode.as_str() {
+                                        "emulation" | "Emulation" => TradingMode::Emulation,
+                                        "live" | "Live" => TradingMode::Live,
+                                        _ => {
+                                            let msg = ServerResponse::Error {
+                                                message: format!("Invalid mode: {}", mode),
+                                            };
+                                            if let Ok(json) = serde_json::to_string(&msg) {
+                                                let _ = response_tx.send(json);
+                                            }
+                                            continue;
+                                        }
+                                    };
+                                    
+                                    match system_manager_recv.switch_mode(trading_mode).await {
+                                        Ok(_) => {
+                                            let state = system_manager_recv.get_state().await;
+                                            let msg = ServerResponse::SystemState {
+                                                is_running: state.is_running,
+                                                mode: format!("{:?}", state.mode),
+                                                last_updated: state.last_updated,
+                                                trading_settings: state.trading_settings,
+                                            };
+                                            if let Ok(json) = serde_json::to_string(&msg) {
+                                                let _ = response_tx.send(json);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            let msg = ServerResponse::Error {
+                                                message: format!("{}", e),
+                                            };
+                                            if let Ok(json) = serde_json::to_string(&msg) {
+                                                let _ = response_tx.send(json);
+                                            }
+                                        }
+                                    }
+                                }
+                                ClientCommand::GetSystemState => {
+                                    let state = system_manager_recv.get_state().await;
+                                    let msg = ServerResponse::SystemState {
+                                        is_running: state.is_running,
+                                        mode: format!("{:?}", state.mode),
+                                        last_updated: state.last_updated,
+                                        trading_settings: state.trading_settings,
+                                    };
+                                    if let Ok(json) = serde_json::to_string(&msg) {
+                                        let _ = response_tx.send(json);
+                                    }
                                 }
                             }
                         }
