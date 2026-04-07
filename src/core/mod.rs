@@ -23,5 +23,5 @@ pub use position_manager::PositionManager;
 pub use trading_history::{TradingStats, TradeRecord};
 pub use time_sync::TimeSync;
 pub use ring_buffer::{RingBuffer, PriceSnapshot};
-pub use system_manager_optimized::{SystemManager, TradingMode, SystemState, TradingSettings};
+pub use system_manager_optimized::{SystemManager, TradingMode, TradingSettings};
 pub use trading_mode_manager::TradingModeManager;

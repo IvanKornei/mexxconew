@@ -4,6 +4,15 @@ pub struct SpreadCalculator {
     mexc_fee: f64,
 }
 
+/// Spread data
+#[derive(Debug, Clone)]
+pub struct Spread {
+    pub binance_price: f64,
+    pub mexc_price: f64,
+    pub spread_percent: f64,
+    pub net_spread_percent: f64,
+}
+
 impl SpreadCalculator {
     pub fn new(binance_fee: f64, mexc_fee: f64) -> Self {
         Self {
@@ -30,6 +39,19 @@ impl SpreadCalculator {
     #[inline]
     pub fn is_opportunity(&self, spread: f64, threshold: f64) -> bool {
         spread.abs() > threshold
+    }
+    
+    /// Calculate full spread data from prices
+    pub fn calculate_spread_data(&self, binance_price: f64, mexc_price: f64) -> Spread {
+        let raw_spread = self.calculate_raw_spread(mexc_price, binance_price);
+        let net_spread = self.calculate_net_spread(mexc_price, binance_price);
+        
+        Spread {
+            binance_price,
+            mexc_price,
+            spread_percent: raw_spread,
+            net_spread_percent: net_spread,
+        }
     }
 }
 

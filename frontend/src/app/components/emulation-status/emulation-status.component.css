@@ -1,0 +1,54 @@
+/* Emulation Status Component Styles */
+
+:host {
+  display: block;
+}
+
+/* Smooth transitions */
+.transition-colors {
+  transition: background-color 0.2s ease-in-out, color 0.2s ease-in-out;
+}
+
+/* Pulse animation for loading */
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.animate-pulse {
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* Status indicator dot */
+.status-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 8px;
+}
+
+.status-dot.valid {
+  background-color: #10b981;
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
+}
+
+.status-dot.invalid {
+  background-color: #ef4444;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.6);
+}
+
+/* Hover effects */
+button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

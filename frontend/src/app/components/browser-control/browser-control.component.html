@@ -1,0 +1,586 @@
+<div class="browser-control">
+  <!-- Header -->
+  <div class="header">
+    <div class="header-left">
+      <h1>🎭 Управление браузером</h1>
+      <p class="subtitle">Полная эмуляция Chrome для MEXC Futures</p>
+    </div>
+    
+    <div class="header-right">
+      <div class="status-badge" [class]="'status-' + getStatusColor()">
+        <span class="status-dot"></span>
+        {{ getStatusText() }}
+      </div>
+      
+      @if (isRunning()) {
+        <div class="session-time">
+          ⏱️ {{ sessionDuration() }}
+        </div>
+      }
+    </div>
+  </div>
+
+  <!-- Status Message -->
+  @if (statusMessage(); as msg) {
+    <div class="message" [class]="'message-' + msg.type">
+      {{ msg.text }}
+      <button class="message-close" (click)="clearMessage()">×</button>
+    </div>
+  }
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button 
+      class="tab"
+      [class.active]="activeTab() === 'control'"
+      (click)="activeTab.set('control')">
+      🎮 Управление
+    </button>
+    <button 
+      class="tab"
+      [class.active]="activeTab() === 'config'"
+      (click)="activeTab.set('config')">
+      ⚙️ Настройки
+    </button>
+    <button 
+      class="tab"
+      [class.active]="activeTab() === 'trading'"
+      (click)="activeTab.set('trading')">
+      📊 Торговля
+    </button>
+    <button 
+      class="tab"
+      [class.active]="activeTab() === 'monitoring'"
+      (click)="activeTab.set('monitoring')">
+      📈 Мониторинг
+    </button>
+  </div>
+
+  <!-- Control Tab -->
+  @if (activeTab() === 'control') {
+    <div class="tab-content">
+      <!-- Quick Actions -->
+      <div class="card">
+        <h2>⚡ Быстрые действия</h2>
+        
+        <div class="actions-grid">
+          @if (!isRunning()) {
+            <button 
+              class="btn btn-primary btn-large"
+              [disabled]="isLoading()"
+              (click)="startBrowser()">
+              @if (isLoading()) {
+                <span class="spinner"></span> Запуск...
+              } @else {
+                🚀 Запустить браузер
+              }
+            </button>
+          } @else {
+            <button 
+              class="btn btn-danger btn-large"
+              [disabled]="isLoading()"
+              (click)="stopBrowser()">
+              @if (isLoading()) {
+                <span class="spinner"></span> Остановка...
+              } @else {
+                ⏹️ Остановить браузер
+              }
+            </button>
+            
+            <button 
+              class="btn btn-secondary"
+              [disabled]="isLoading()"
+              (click)="restartBrowser()">
+              🔄 Перезапустить
+            </button>
+            
+            <button 
+              class="btn btn-secondary"
+              [disabled]="isLoading()"
+              (click)="takeScreenshot()">
+              📸 Скриншот
+            </button>
+            
+            <button 
+              class="btn btn-secondary"
+              [disabled]="isLoading()"
+              (click)="simulateActivity()">
+              👤 Симулировать активность
+            </button>
+          }
+        </div>
+      </div>
+
+      <!-- Browser Status -->
+      @if (browserStatus(); as status) {
+        <div class="card">
+          <h2>📊 Статус браузера</h2>
+          
+          <div class="status-grid">
+            <div class="status-item">
+              <span class="label">Режим:</span>
+              <span class="value">
+                @if (status.mode === 'visible') {
+                  👁️ Видимый
+                } @else {
+                  🕶️ Headless
+                }
+              </span>
+            </div>
+            
+            <div class="status-item">
+              <span class="label">Stealth:</span>
+              <span class="value">
+                @if (status.stealth_enabled) {
+                  ✅ Включен
+                } @else {
+                  ❌ Выключен
+                }
+              </span>
+            </div>
+            
+            <div class="status-item">
+              <span class="label">Человеческое поведение:</span>
+              <span class="value">
+                @if (status.human_behavior_enabled) {
+                  ✅ Включено
+                } @else {
+                  ❌ Выключено
+                }
+              </span>
+            </div>
+            
+            <div class="status-item">
+              <span class="label">Текущая страница:</span>
+              <span class="value url">{{ status.current_url }}</span>
+            </div>
+            
+            <div class="status-item">
+              <span class="label">Последняя активность:</span>
+              <span class="value">{{ status.last_activity }}</span>
+            </div>
+            
+            <div class="status-item">
+              <span class="label">Время сессии:</span>
+              <span class="value">{{ sessionDuration() }}</span>
+            </div>
+          </div>
+        </div>
+      }
+
+      <!-- Quick Info -->
+      <div class="card">
+        <h2>ℹ️ Информация</h2>
+        
+        <div class="info-grid">
+          <div class="info-card">
+            <div class="info-icon">🌐</div>
+            <div class="info-content">
+              <h3>Полная эмуляция</h3>
+              <p>Настоящий Chrome браузер с CDP управлением</p>
+            </div>
+          </div>
+          
+          <div class="info-card">
+            <div class="info-icon">🎭</div>
+            <div class="info-content">
+              <h3>Stealth режим</h3>
+              <p>100% неотличимость от реального пользователя</p>
+            </div>
+          </div>
+          
+          <div class="info-card">
+            <div class="info-icon">👤</div>
+            <div class="info-content">
+              <h3>Человеческое поведение</h3>
+              <p>Задержки, движения мыши, периодическая активность</p>
+            </div>
+          </div>
+          
+          <div class="info-card">
+            <div class="info-icon">🔒</div>
+            <div class="info-content">
+              <h3>Безопасность</h3>
+              <p>Cookies шифруются, сессия защищена</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  }
+
+  <!-- Config Tab -->
+  @if (activeTab() === 'config') {
+    <div class="tab-content">
+      <div class="card">
+        <h2>⚙️ Конфигурация браузера</h2>
+        
+        <div class="config-section">
+          <h3>🖥️ Основные настройки</h3>
+          
+          <div class="form-group">
+            <label>Режим работы</label>
+            <select 
+              [value]="browserConfig().mode"
+              (change)="updateConfig('mode', $any($event.target).value)">
+              <option value="visible">👁️ Видимый (для отладки)</option>
+              <option value="headless">🕶️ Headless (для production)</option>
+            </select>
+            <p class="hint">Headless режим быстрее и не требует GUI</p>
+          </div>
+          
+          <div class="form-row">
+            <div class="form-group">
+              <label>Ширина окна</label>
+              <input 
+                type="number"
+                [value]="browserConfig().window_width"
+                (input)="updateConfig('window_width', +$any($event.target).value)"
+                min="1024"
+                max="3840">
+            </div>
+            
+            <div class="form-group">
+              <label>Высота окна</label>
+              <input 
+                type="number"
+                [value]="browserConfig().window_height"
+                (input)="updateConfig('window_height', +$any($event.target).value)"
+                min="768"
+                max="2160">
+            </div>
+          </div>
+        </div>
+
+        <div class="config-section">
+          <h3>🎭 Stealth и эмуляция</h3>
+          
+          <div class="form-group">
+            <label class="checkbox-label">
+              <input 
+                type="checkbox"
+                [checked]="browserConfig().stealth_mode"
+                (change)="updateConfig('stealth_mode', $any($event.target).checked)">
+              <span>Включить Stealth режим</span>
+            </label>
+            <p class="hint">Скрывает признаки автоматизации (navigator.webdriver, plugins, etc.)</p>
+          </div>
+          
+          <div class="form-group">
+            <label class="checkbox-label">
+              <input 
+                type="checkbox"
+                [checked]="browserConfig().human_behavior"
+                (change)="updateConfig('human_behavior', $any($event.target).checked)">
+              <span>Человеческое поведение</span>
+            </label>
+            <p class="hint">Добавляет задержки и естественные движения</p>
+          </div>
+        </div>
+
+        <div class="config-section">
+          <h3>⏱️ Задержки (мс)</h3>
+          
+          <div class="form-row">
+            <div class="form-group">
+              <label>Печать: мин</label>
+              <input 
+                type="number"
+                [value]="browserConfig().typing_delay_min"
+                (input)="updateConfig('typing_delay_min', +$any($event.target).value)"
+                min="0"
+                max="1000">
+            </div>
+            
+            <div class="form-group">
+              <label>Печать: макс</label>
+              <input 
+                type="number"
+                [value]="browserConfig().typing_delay_max"
+                (input)="updateConfig('typing_delay_max', +$any($event.target).value)"
+                min="0"
+                max="1000">
+            </div>
+          </div>
+          
+          <div class="form-row">
+            <div class="form-group">
+              <label>Клик: мин</label>
+              <input 
+                type="number"
+                [value]="browserConfig().click_delay_min"
+                (input)="updateConfig('click_delay_min', +$any($event.target).value)"
+                min="0"
+                max="2000">
+            </div>
+            
+            <div class="form-group">
+              <label>Клик: макс</label>
+              <input 
+                type="number"
+                [value]="browserConfig().click_delay_max"
+                (input)="updateConfig('click_delay_max', +$any($event.target).value)"
+                min="0"
+                max="2000">
+            </div>
+          </div>
+          
+          <p class="hint">Меньше задержки = быстрее, но выше риск обнаружения</p>
+        </div>
+
+        <div class="config-section">
+          <h3>🤖 Автоматическая активность</h3>
+          
+          <div class="form-group">
+            <label class="checkbox-label">
+              <input 
+                type="checkbox"
+                [checked]="browserConfig().auto_activity_enabled"
+                (change)="updateConfig('auto_activity_enabled', $any($event.target).checked)">
+              <span>Включить автоактивность</span>
+            </label>
+            <p class="hint">Периодически проверяет баланс, смотрит графики</p>
+          </div>
+          
+          <div class="form-group">
+            <label>Интервал (минуты)</label>
+            <input 
+              type="number"
+              [value]="browserConfig().auto_activity_interval_minutes"
+              (input)="updateConfig('auto_activity_interval_minutes', +$any($event.target).value)"
+              min="1"
+              max="60"
+              [disabled]="!browserConfig().auto_activity_enabled">
+          </div>
+        </div>
+
+        <div class="config-section">
+          <h3>🌍 Локализация</h3>
+          
+          <div class="form-group">
+            <label>Часовой пояс</label>
+            <select 
+              [value]="browserConfig().timezone"
+              (change)="updateConfig('timezone', $any($event.target).value)">
+              <option value="Europe/Moscow">🇷🇺 Europe/Moscow (MSK)</option>
+              <option value="Europe/London">🇬🇧 Europe/London (GMT)</option>
+              <option value="America/New_York">🇺🇸 America/New_York (EST)</option>
+              <option value="Asia/Shanghai">🇨🇳 Asia/Shanghai (CST)</option>
+              <option value="Asia/Tokyo">🇯🇵 Asia/Tokyo (JST)</option>
+            </select>
+          </div>
+          
+          <div class="form-group">
+            <label>Язык</label>
+            <select 
+              [value]="browserConfig().language"
+              (change)="updateConfig('language', $any($event.target).value)">
+              <option value="ru-RU">🇷🇺 Русский</option>
+              <option value="en-US">🇺🇸 English (US)</option>
+              <option value="en-GB">🇬🇧 English (UK)</option>
+              <option value="zh-CN">🇨🇳 中文</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="config-section">
+          <h3>🔧 Дополнительно</h3>
+          
+          <div class="form-group">
+            <label class="checkbox-label">
+              <input 
+                type="checkbox"
+                [checked]="browserConfig().screenshot_on_error"
+                (change)="updateConfig('screenshot_on_error', $any($event.target).checked)">
+              <span>Скриншот при ошибке</span>
+            </label>
+            <p class="hint">Автоматически сохраняет скриншот при возникновении ошибок</p>
+          </div>
+        </div>
+
+        <div class="config-actions">
+          <button 
+            class="btn btn-primary"
+            [disabled]="isLoading()"
+            (click)="saveConfig()">
+            💾 Сохранить настройки
+          </button>
+          
+          <button 
+            class="btn btn-secondary"
+            (click)="resetConfig()">
+            🔄 Сбросить к умолчанию
+          </button>
+        </div>
+      </div>
+    </div>
+  }
+
+  <!-- Trading Tab -->
+  @if (activeTab() === 'trading') {
+    <div class="tab-content">
+      <div class="card">
+        <h2>📊 Размещение ордеров</h2>
+        
+        <div class="trading-form">
+          <div class="form-group">
+            <label>Тип ордера</label>
+            <div class="button-group">
+              <button 
+                class="btn"
+                [class.btn-primary]="tradingForm().type === 'market'"
+                [class.btn-secondary]="tradingForm().type !== 'market'"
+                (click)="updateTradingForm('type', 'market')">
+                ⚡ Market
+              </button>
+              <button 
+                class="btn"
+                [class.btn-primary]="tradingForm().type === 'limit'"
+                [class.btn-secondary]="tradingForm().type !== 'limit'"
+                (click)="updateTradingForm('type', 'limit')">
+                📌 Limit
+              </button>
+            </div>
+          </div>
+          
+          <div class="form-group">
+            <label>Направление</label>
+            <div class="button-group">
+              <button 
+                class="btn"
+                [class.btn-success]="tradingForm().side === 'BUY'"
+                [class.btn-secondary]="tradingForm().side !== 'BUY'"
+                (click)="updateTradingForm('side', 'BUY')">
+                📈 BUY / LONG
+              </button>
+              <button 
+                class="btn"
+                [class.btn-danger]="tradingForm().side === 'SELL'"
+                [class.btn-secondary]="tradingForm().side !== 'SELL'"
+                (click)="updateTradingForm('side', 'SELL')">
+                📉 SELL / SHORT
+              </button>
+            </div>
+          </div>
+          
+          @if (tradingForm().type === 'limit') {
+            <div class="form-group">
+              <label>Цена (USDT)</label>
+              <input 
+                type="number"
+                [value]="tradingForm().price"
+                (input)="updateTradingForm('price', +$any($event.target).value)"
+                step="0.01"
+                min="0">
+            </div>
+          }
+          
+          <div class="form-group">
+            <label>Количество (BTC)</label>
+            <input 
+              type="number"
+              [value]="tradingForm().quantity"
+              (input)="updateTradingForm('quantity', +$any($event.target).value)"
+              step="0.001"
+              min="0.001">
+          </div>
+          
+          <button 
+            class="btn btn-primary btn-large"
+            [disabled]="isLoading() || !isRunning() || !isLoggedIn()"
+            (click)="placeOrder()">
+            @if (isLoading()) {
+              <span class="spinner"></span> Размещение...
+            } @else {
+              🚀 Разместить ордер
+            }
+          </button>
+          
+          @if (!isRunning()) {
+            <p class="warning">⚠️ Запустите браузер для торговли</p>
+          } @else if (!isLoggedIn()) {
+            <p class="warning">⚠️ Браузер не залогинен в MEXC</p>
+          }
+        </div>
+      </div>
+    </div>
+  }
+
+  <!-- Monitoring Tab -->
+  @if (activeTab() === 'monitoring') {
+    <div class="tab-content">
+      <!-- Balance -->
+      <div class="card">
+        <div class="card-header">
+          <h2>💰 Баланс</h2>
+          <button 
+            class="btn btn-sm btn-secondary"
+            [disabled]="isLoading()"
+            (click)="refreshBalance()">
+            🔄 Обновить
+          </button>
+        </div>
+        
+        <div class="balance-display">
+          <div class="balance-amount">${{ balance().toFixed(2) }}</div>
+          <div class="balance-label">USDT</div>
+        </div>
+      </div>
+
+      <!-- Positions -->
+      <div class="card">
+        <div class="card-header">
+          <h2>📊 Открытые позиции</h2>
+          <button 
+            class="btn btn-sm btn-secondary"
+            [disabled]="isLoading()"
+            (click)="refreshPositions()">
+            🔄 Обновить
+          </button>
+        </div>
+        
+        @if (positions().length > 0) {
+          <div class="positions-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>Символ</th>
+                  <th>Направление</th>
+                  <th>Размер</th>
+                  <th>Цена входа</th>
+                  <th>Плечо</th>
+                  <th>PnL</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (pos of positions(); track pos.symbol) {
+                  <tr>
+                    <td class="symbol">{{ pos.symbol }}</td>
+                    <td>
+                      <span 
+                        class="side-badge"
+                        [class.side-long]="pos.side === 'LONG'"
+                        [class.side-short]="pos.side === 'SHORT'">
+                        {{ pos.side }}
+                      </span>
+                    </td>
+                    <td>{{ pos.size }}</td>
+                    <td>${{ pos.entry_price.toFixed(2) }}</td>
+                    <td>{{ pos.leverage }}x</td>
+                    <td [class.pnl-positive]="pos.pnl > 0" [class.pnl-negative]="pos.pnl < 0">
+                      ${{ pos.pnl.toFixed(2) }}
+                    </td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </div>
+        } @else {
+          <div class="empty-state">
+            <p>Нет открытых позиций</p>
+          </div>
+        }
+      </div>
+    </div>
+  }
+</div>

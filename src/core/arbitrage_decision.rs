@@ -82,7 +82,7 @@ impl ArbitrageDecisionMaker {
     /// Принимает решение об арбитраже
     pub fn make_decision(&self) -> Option<ArbitrageDecision> {
         // Получаем текущий спред
-        let spread_diff = self.synchronizer.get_synchronized_spread()?;
+        let _spread_diff = self.synchronizer.get_synchronized_spread()?;
         
         // Получаем лаг
         let lag = self.synchronizer.get_mexc_lag()?;

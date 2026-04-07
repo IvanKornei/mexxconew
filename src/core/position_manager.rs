@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::core::trading_strategy::{ImpulseStrategy, Position};
 use crate::core::capital_manager::CapitalManager;
@@ -12,6 +12,8 @@ use crate::core::PriceState;
 use crate::utils::LatencyMetrics;
 use crate::core::system_manager_optimized::TradingMode;
 use crate::core::trading_mode_manager::TradingModeManager;
+use crate::emulation::browser::BrowserActions;
+use crate::exchanges::binance_client::BinanceClient;
 
 /// Менеджер позиций с управлением капиталом
 pub struct PositionManager {
@@ -28,6 +30,10 @@ pub struct PositionManager {
     
     // Менеджер режимов торговли
     trading_mode_manager: Arc<RwLock<Option<Arc<TradingModeManager>>>>,
+    
+    // Клиенты для исполнения ордеров
+    browser_actions: Arc<RwLock<Option<BrowserActions>>>,
+    binance_client: Arc<RwLock<Option<Arc<BinanceClient>>>>,
     
     // Метрики производительности
     market_state_metrics: Arc<LatencyMetrics>,
@@ -51,9 +57,23 @@ impl PositionManager {
             is_trading_enabled: Arc::new(RwLock::new(false)),
             execution_mode: Arc::new(RwLock::new(TradingMode::Emulation)),
             trading_mode_manager: Arc::new(RwLock::new(None)),
+            browser_actions: Arc::new(RwLock::new(None)),
+            binance_client: Arc::new(RwLock::new(None)),
             market_state_metrics: Arc::new(LatencyMetrics::new()),
             position_update_metrics: Arc::new(LatencyMetrics::new()),
         }
+    }
+    
+    /// Устанавливает BrowserActions для MEXC
+    pub async fn set_browser_actions(&self, browser: BrowserActions) {
+        *self.browser_actions.write().await = Some(browser);
+        info!("🌐 Browser actions connected to position manager");
+    }
+    
+    /// Устанавливает Binance client
+    pub async fn set_binance_client(&self, client: Arc<BinanceClient>) {
+        *self.binance_client.write().await = Some(client);
+        info!("📡 Binance client connected to position manager");
     }
     
     /// Устанавливает TradingModeManager для записи сделок в правильную БД
@@ -200,6 +220,12 @@ impl PositionManager {
         let current_count = self.active_count.load(Ordering::SeqCst);
         
         if current_count < max_positions {
+            // Проверяем что цены валидные (не 0 и не NaN)
+            if state.mexc <= 0.0 || state.mexc.is_nan() || state.binance <= 0.0 || state.binance.is_nan() {
+                // Цены еще не получены, пропускаем
+                return;
+            }
+            
             // Проверяем достаточно ли капитала
             let capital = self.capital_manager.read().await;
             let current_capital = capital.get_current_capital();
@@ -268,12 +294,21 @@ impl PositionManager {
                     }
                     TradingMode::Live => {
                         info!(
-                            "🚀 OPENED (LIVE) | {} | {:?} | Entry: {:.2} | Size: {:.6} BTC | Capital: ${:.2} | AvgLag: {}ms",
+                            "🚀 OPENING (LIVE) | {} | {:?} | Entry: {:.2} | Size: {:.6} BTC | Capital: ${:.2} | AvgLag: {}ms",
                             position.id, side, position.entry_price, position_size_btc,
                             capital.get_current_capital(), avg_lag
                         );
-                        // TODO: Здесь будет интеграция с Exchange API для отправки реальных ордеров
-                        // self.execute_real_order(&position).await?;
+                        
+                        // Исполняем реальный ордер на MEXC
+                        match self.execute_live_order(&position).await {
+                            Ok(order_id) => {
+                                info!("✅ Live order executed on MEXC: {}", order_id);
+                            }
+                            Err(e) => {
+                                warn!("❌ Failed to execute live order: {}. Position will be tracked as emulation.", e);
+                                // Продолжаем как emulation если не удалось
+                            }
+                        }
                     }
                 }
                 
@@ -439,6 +474,24 @@ impl PositionManager {
     /// Возвращает текущий режим выполнения
     pub async fn get_execution_mode(&self) -> TradingMode {
         *self.execution_mode.read().await
+    }
+    
+    /// Исполняет реальный ордер на MEXC через browser
+    async fn execute_live_order(&self, position: &Position) -> Result<String, String> {
+        let side = match position.side {
+            crate::core::trading_strategy::PositionSide::Long => "BUY",
+            crate::core::trading_strategy::PositionSide::Short => "SELL",
+        };
+        
+        let mut browser_guard = self.browser_actions.write().await;
+        if let Some(ref mut browser) = *browser_guard {
+            match browser.place_market_order(side, position.quantity).await {
+                Ok(order_id) => Ok(order_id),
+                Err(e) => Err(format!("MEXC order failed: {}", e)),
+            }
+        } else {
+            Err("Browser not initialized".to_string())
+        }
     }
 }
 

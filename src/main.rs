@@ -4,6 +4,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod api;
 mod core;
+mod emulation;
 mod exchanges;
 mod utils;
 
@@ -33,6 +34,11 @@ async fn main() -> anyhow::Result<()> {
     // Load configuration
     let config = Config::load_from_file("config.toml")?;
     info!("✅ Configuration loaded successfully");
+    
+    // Log emulation configuration
+    if let Some(emulation_config) = &config.emulation {
+        info!("🎭 Emulation mode: {:?}", emulation_config.trading_mode);
+    }
     
     // Create health monitoring system
     let mut system_health = SystemHealth::new();
@@ -70,6 +76,10 @@ async fn main() -> anyhow::Result<()> {
     
     // Connect trading mode manager to position manager
     position_manager.set_trading_mode_manager(trading_mode_manager.clone()).await;
+    
+    // Enable trading by default for emulation mode
+    position_manager.set_trading_enabled(true).await;
+    info!("✅ Trading enabled for emulation mode");
     
     // Create system manager for state persistence and control
     let system_manager = Arc::new(SystemManager::new(position_manager.clone()));

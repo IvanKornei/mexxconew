@@ -37,6 +37,9 @@ pub enum ConnectionError {
     
     #[error("Operation '{operation}' timed out after {timeout_ms}ms")]
     Timeout { operation: String, timeout_ms: u64 },
+    
+    #[error("{0}")]
+    Other(String),
 }
 
 #[derive(Debug, Error)]
@@ -58,6 +61,18 @@ pub enum ApiError {
     
     #[error("Parse error: {0}")]
     ParseError(String),
+    
+    #[error("Connection error: {0}")]
+    Connection(String),
+    
+    #[error("Authentication error: {0}")]
+    Authentication(String),
+    
+    #[error("Rate limit error: {0}")]
+    RateLimit(String),
+    
+    #[error("Order failed: {0}")]
+    OrderFailed(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

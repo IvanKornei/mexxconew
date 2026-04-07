@@ -25,3 +25,55 @@ latency_warning_threshold_ms = 100
 host = "0.0.0.0"
 port = 3001
 cors_origins = ["http://localhost:4200"]
+
+[emulation]
+trading_mode = "Hybrid"  # "Hybrid" or "Aggressive"
+browser_profile = "Chrome145Windows64"
+session_storage_path = ".kiro/emulation/session.enc"
+encryption_key_env = "EMULATION_SESSION_KEY"
+
+# Cookie extraction settings
+[emulation.cookies]
+# Auto-extract cookies from browser on startup
+auto_extract_on_startup = true
+# Preferred browser: "Chrome", "Edge", "Firefox", or "Auto" for auto-detection
+preferred_browser = "Auto"
+# Auto-refresh cookies from browser every N minutes (0 to disable)
+auto_refresh_interval_minutes = 30
+# Fallback to manual cookies from environment variable if auto-extraction fails
+manual_cookies_env = "MEXC_COOKIES"
+
+[emulation.rate_limits]
+max_orders_per_minute = 60
+background_actions_per_hour_hybrid = 6      # every 10 minutes
+background_actions_per_hour_aggressive = 2  # every 30 minutes
+
+[emulation.jitter]
+enabled_in_hybrid = true
+min_delay_ms = 20
+max_delay_ms = 80
+mean_delay_ms = 50
+std_dev_ms = 15
+
+[emulation.session]
+max_session_duration_hours = 24
+auto_refresh_before_expiry_minutes = 30
+
+[emulation.proxy]
+enabled = false
+# Optional: residential proxy configuration
+# provider = "brightdata"
+# sticky_session = true
+
+[emulation.behavior]
+typing_delay_range_ms = [100, 300]
+mouse_movement_steps = 50
+scroll_acceleration = true
+
+[emulation.periodic_activity]
+check_balance_probability = 0.3
+view_positions_probability = 0.4
+view_history_probability = 0.2
+view_other_pair_probability = 0.1
+break_duration_minutes = [2, 5]
+break_interval_hours = [2, 3]

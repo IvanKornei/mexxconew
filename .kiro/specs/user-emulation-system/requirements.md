@@ -27,7 +27,7 @@
 
 #### Acceptance Criteria
 
-1. WHEN THE SessionInitializer запускается, THE SessionInitializer SHALL эмулировать открытие браузера Chrome 136 с корректными TLS-отпечатками
+1. WHEN THE SessionInitializer запускается, THE SessionInitializer SHALL эмулировать открытие браузера Chrome 145 (64-bit) с корректными TLS-отпечатками
 2. WHEN THE SessionInitializer загружает страницу MEXC, THE SessionInitializer SHALL выполнить загрузку всех статических ресурсов (CSS, JS, изображения) для имитации реального браузера
 3. WHEN THE SessionInitializer проходит аутентификацию, THE BehaviorSimulator SHALL имитировать ввод логина и пароля с задержками 100-300мс между символами
 4. WHEN THE SessionInitializer проходит аутентификацию, THE BehaviorSimulator SHALL имитировать движение мыши по кривой Безье к кнопке входа с последующим кликом
@@ -83,10 +83,10 @@
 
 #### Acceptance Criteria
 
-1. THE TLSEmulator SHALL генерировать JA3-отпечаток, идентичный Chrome 136 для Windows
+1. THE TLSEmulator SHALL генерировать JA3-отпечаток, идентичный Chrome 145 (64-bit) для Windows
 2. THE TLSEmulator SHALL использовать BoringSSL для низкоуровневого контроля над TLS-рукопожатием
 3. WHEN THE WebSocketEmulator выполняет HTTP Upgrade, THE WebSocketEmulator SHALL использовать те же TLS-отпечатки, что и SessionInitializer
-4. THE TLSEmulator SHALL генерировать HTTP/2 кадры SETTINGS с параметрами Chrome 136
+4. THE TLSEmulator SHALL генерировать HTTP/2 кадры SETTINGS с параметрами Chrome 145 (64-bit)
 5. THE TLSEmulator SHALL сохранять оригинальный регистр HTTP-заголовков согласно спецификации Chrome
 
 ### Requirement 6
@@ -187,4 +187,4 @@
 2. WHEN THE TradingExecutor работает в Aggressive режиме, THE TradingExecutor SHALL поддерживать минимальный интервал между сделками 100мс для предотвращения rate limiting
 3. WHEN THE TradingExecutor работает в Aggressive режиме, THE PeriodicActivitySimulator SHALL выполнять минимальные фоновые действия (только проверка баланса) каждые 30-60 минут
 4. THE EmulationSystem в Aggressive режиме SHALL пропускать имитацию "перерывов" для непрерывной торговли
-5. WHEN THE EmulationSystem в Aggressive режиме получает ошибку 429 или блокировку, THE EmulationSystem SHALL автоматически переключиться на Hybrid режим и выполнить полную переинициализацию сессии
+5. WHEN THE EmulationSystem в Aggressive режиме получает ошибку 429 или блокировку, THE EmulationSystem SHALL автоматически переключиться на Hybrid режим, выполнить полную переинициализацию сессии через SessionInitializer и продолжить работу в Hybrid режиме
