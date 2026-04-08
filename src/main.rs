@@ -4,7 +4,6 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod api;
 mod core;
-mod emulation;
 mod exchanges;
 mod utils;
 
@@ -14,6 +13,7 @@ use std::time::Duration;
 
 use crate::api::WsServer;
 use crate::core::{PriceFeedManager, SystemManager, TradingModeManager};
+use crate::exchanges::mexc_client::MexcClient;
 use crate::utils::{Config, SystemHealth, HealthChecker};
 
 #[tokio::main]
@@ -34,11 +34,6 @@ async fn main() -> anyhow::Result<()> {
     // Load configuration
     let config = Config::load_from_file("config.toml")?;
     info!("✅ Configuration loaded successfully");
-    
-    // Log emulation configuration
-    if let Some(emulation_config) = &config.emulation {
-        info!("🎭 Emulation mode: {:?}", emulation_config.trading_mode);
-    }
     
     // Create health monitoring system
     let mut system_health = SystemHealth::new();
@@ -76,7 +71,25 @@ async fn main() -> anyhow::Result<()> {
     
     // Connect trading mode manager to position manager
     position_manager.set_trading_mode_manager(trading_mode_manager.clone()).await;
-    
+
+    // Connect MEXC API client if credentials provided
+    match (
+        std::env::var("MEXC_API_KEY").ok(),
+        std::env::var("MEXC_API_SECRET").ok(),
+    ) {
+        (Some(api_key), Some(api_secret)) if !api_key.is_empty() && !api_secret.is_empty() => {
+            let mexc_client = Arc::new(MexcClient::new(api_key, api_secret));
+            position_manager.set_mexc_client(mexc_client).await;
+            info!("✅ MEXC API client connected (Live trading ready)");
+        }
+        _ => {
+            tracing::warn!(
+                "⚠️ MEXC_API_KEY/MEXC_API_SECRET not set — Live trading disabled. \
+                 Emulation mode will still work."
+            );
+        }
+    }
+
     // Enable trading by default for emulation mode
     position_manager.set_trading_enabled(true).await;
     info!("✅ Trading enabled for emulation mode");

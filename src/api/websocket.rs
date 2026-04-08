@@ -17,8 +17,7 @@ use std::sync::Arc;
 
 use crate::core::{PriceState, PositionManager, Position, TradingStats, TradeRecord, SystemManager, TradingMode};
 use crate::core::trading_strategy::StrategySettings;
-use crate::utils::{SystemHealth};
-use crate::api::emulation_status::{EmulationStatus, get_emulation_status};
+use crate::utils::SystemHealth;
 
 /// Команды от клиента
 #[derive(Debug, Deserialize)]
@@ -108,29 +107,14 @@ impl WsServer {
             .allow_origin(Any)
             .allow_methods(Any)
             .allow_headers(Any);
-        
+
         let health = self.system_health.clone();
-        
-        // Create emulation status state
-        let emulation_status = Arc::new(tokio::sync::RwLock::new(
-            EmulationStatus::default()
-        ));
-        
-        // Create emulation status router with its own state
-        let emulation_router = Router::new()
-            .route("/api/emulation/status", get(get_emulation_status))
-            .with_state(emulation_status);
-        
-        // Main router
-        let main_router = Router::new()
+
+        Router::new()
             .route("/ws", get(ws_handler))
             .route("/health", get(move || health_handler(health)))
             .route("/health/detailed", get(move || detailed_health_handler(self.system_health.clone())))
-            .with_state((self.state_rx, self.position_manager, self.system_manager));
-        
-        // Merge routers
-        main_router
-            .merge(emulation_router)
+            .with_state((self.state_rx, self.position_manager, self.system_manager))
             .layer(cors)
     }
 }

@@ -11,16 +11,6 @@ tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 
-# Browser automation - Full Chrome/Chromium control via CDP
-headless_chrome = "1.0"  # Chrome DevTools Protocol
-chromiumoxide = { version = "0.7", features = ["tokio-runtime"] }  # Alternative CDP client
-
-# Browser cookie extraction
-directories = "5.0"  # Cross-platform user directories
-aes = "0.8"  # AES decryption for Chrome cookies
-cbc = "0.1"  # CBC mode for AES
-base64 = "0.22"  # Base64 encoding/decoding
-
 # Web framework
 axum = { version = "0.7", features = ["ws"] }
 tower = "0.5"
@@ -34,11 +24,10 @@ simd-json = "0.13"  # SIMD-accelerated JSON parsing for hot paths
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 
-# Crypto
+# Crypto (HMAC signing for exchange REST APIs)
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
-aes-gcm = "0.10"  # AES-256-GCM encryption for session storage
 
 # Error handling
 thiserror = "2.0"
@@ -73,8 +62,7 @@ rust_decimal_macros = "1.35"
 
 # Fast parsing for HFT
 fast-float = "0.2"  # 10x faster float parsing than std
-rand = "0.8"  # Random number generation for behavior simulation
-rand_distr = "0.4"  # Statistical distributions for human jitter
+rand = "0.8"  # Random number generation
 
 # Rate limiting
 governor = "0.6"  # Token bucket rate limiter for API calls

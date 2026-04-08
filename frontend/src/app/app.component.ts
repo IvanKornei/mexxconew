@@ -8,21 +8,19 @@ import { PositionsPanelComponent } from './components/positions-panel.component'
 import { TradingSettingsComponent, TradingSettings } from './components/trading-settings.component';
 import { TradingStatsComponent } from './components/trading-stats.component';
 import { ControlPanelComponent } from './components/control-panel.component';
-import { EmulationStatusComponent } from './components/emulation-status/emulation-status.component';
 
 @Component({
   selector: 'app-root',
   standalone: true,
   imports: [
-    CommonModule, 
-    PriceCardComponent, 
-    SpreadVisualizerComponent, 
-    HistoryTableComponent, 
+    CommonModule,
+    PriceCardComponent,
+    SpreadVisualizerComponent,
+    HistoryTableComponent,
     PositionsPanelComponent,
     TradingSettingsComponent,
     TradingStatsComponent,
-    ControlPanelComponent,
-    EmulationStatusComponent
+    ControlPanelComponent
   ],
   template: `
     <div class="min-h-screen bg-slate-900 p-8">
@@ -39,12 +37,7 @@ import { EmulationStatusComponent } from './components/emulation-status/emulatio
         
         <!-- Control Panel -->
         <app-control-panel></app-control-panel>
-        
-        <!-- Emulation Status -->
-        <div class="mt-6">
-          <app-emulation-status></app-emulation-status>
-        </div>
-        
+
         <!-- Main Grid -->
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
           <!-- Binance Price -->

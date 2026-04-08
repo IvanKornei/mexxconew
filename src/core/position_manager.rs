@@ -12,8 +12,10 @@ use crate::core::PriceState;
 use crate::utils::LatencyMetrics;
 use crate::core::system_manager_optimized::TradingMode;
 use crate::core::trading_mode_manager::TradingModeManager;
-use crate::emulation::browser::BrowserActions;
 use crate::exchanges::binance_client::BinanceClient;
+use crate::exchanges::client::{ExchangeClient, OrderRequest, OrderSide, OrderType};
+use crate::exchanges::mexc_client::MexcClient;
+use rust_decimal::Decimal;
 
 /// Менеджер позиций с управлением капиталом
 pub struct PositionManager {
@@ -31,8 +33,8 @@ pub struct PositionManager {
     // Менеджер режимов торговли
     trading_mode_manager: Arc<RwLock<Option<Arc<TradingModeManager>>>>,
     
-    // Клиенты для исполнения ордеров
-    browser_actions: Arc<RwLock<Option<BrowserActions>>>,
+    // Клиенты для исполнения ордеров (прямые REST API)
+    mexc_client: Arc<RwLock<Option<Arc<MexcClient>>>>,
     binance_client: Arc<RwLock<Option<Arc<BinanceClient>>>>,
     
     // Метрики производительности
@@ -57,19 +59,19 @@ impl PositionManager {
             is_trading_enabled: Arc::new(RwLock::new(false)),
             execution_mode: Arc::new(RwLock::new(TradingMode::Emulation)),
             trading_mode_manager: Arc::new(RwLock::new(None)),
-            browser_actions: Arc::new(RwLock::new(None)),
+            mexc_client: Arc::new(RwLock::new(None)),
             binance_client: Arc::new(RwLock::new(None)),
             market_state_metrics: Arc::new(LatencyMetrics::new()),
             position_update_metrics: Arc::new(LatencyMetrics::new()),
         }
     }
     
-    /// Устанавливает BrowserActions для MEXC
-    pub async fn set_browser_actions(&self, browser: BrowserActions) {
-        *self.browser_actions.write().await = Some(browser);
-        info!("🌐 Browser actions connected to position manager");
+    /// Устанавливает MEXC REST клиент для реальных ордеров
+    pub async fn set_mexc_client(&self, client: Arc<MexcClient>) {
+        *self.mexc_client.write().await = Some(client);
+        info!("📡 MEXC API client connected to position manager");
     }
-    
+
     /// Устанавливает Binance client
     pub async fn set_binance_client(&self, client: Arc<BinanceClient>) {
         *self.binance_client.write().await = Some(client);
@@ -476,21 +478,32 @@ impl PositionManager {
         *self.execution_mode.read().await
     }
     
-    /// Исполняет реальный ордер на MEXC через browser
+    /// Исполняет реальный ордер на MEXC через REST API
     async fn execute_live_order(&self, position: &Position) -> Result<String, String> {
         let side = match position.side {
-            crate::core::trading_strategy::PositionSide::Long => "BUY",
-            crate::core::trading_strategy::PositionSide::Short => "SELL",
+            crate::core::trading_strategy::PositionSide::Long => OrderSide::Buy,
+            crate::core::trading_strategy::PositionSide::Short => OrderSide::Sell,
         };
-        
-        let mut browser_guard = self.browser_actions.write().await;
-        if let Some(ref mut browser) = *browser_guard {
-            match browser.place_market_order(side, position.quantity).await {
-                Ok(order_id) => Ok(order_id),
-                Err(e) => Err(format!("MEXC order failed: {}", e)),
-            }
-        } else {
-            Err("Browser not initialized".to_string())
+
+        let client_guard = self.mexc_client.read().await;
+        let client = client_guard
+            .as_ref()
+            .ok_or_else(|| "MEXC API client not configured".to_string())?;
+
+        let quantity = Decimal::from_f64_retain(position.quantity)
+            .ok_or_else(|| format!("Invalid quantity: {}", position.quantity))?;
+
+        let order_request = OrderRequest {
+            symbol: "BTC_USDT".to_string(),
+            side,
+            order_type: OrderType::Market,
+            quantity,
+            price: None,
+        };
+
+        match client.place_order(order_request).await {
+            Ok(order) => Ok(order.id),
+            Err(e) => Err(format!("MEXC order failed: {}", e)),
         }
     }
 }
