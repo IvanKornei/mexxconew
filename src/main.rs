@@ -72,22 +72,26 @@ async fn main() -> anyhow::Result<()> {
     // Connect trading mode manager to position manager
     position_manager.set_trading_mode_manager(trading_mode_manager.clone()).await;
 
-    // Connect MEXC API client if credentials provided
-    match (
-        std::env::var("MEXC_API_KEY").ok(),
-        std::env::var("MEXC_API_SECRET").ok(),
-    ) {
-        (Some(api_key), Some(api_secret)) if !api_key.is_empty() && !api_secret.is_empty() => {
-            let mexc_client = Arc::new(MexcClient::new(api_key, api_secret));
-            position_manager.set_mexc_client(mexc_client).await;
-            info!("✅ MEXC API client connected (Live trading ready)");
-        }
-        _ => {
-            tracing::warn!(
-                "⚠️ MEXC_API_KEY/MEXC_API_SECRET not set — Live trading disabled. \
-                 Emulation mode will still work."
-            );
-        }
+    // Connect MEXC API client only when real credentials are provided.
+    // Placeholder values (e.g. "your_api_key_here") are treated as unset so that
+    // paper/emulation runs don't accidentally advertise Live trading as ready.
+    let mexc_key = std::env::var("MEXC_API_KEY").ok().unwrap_or_default();
+    let mexc_secret = std::env::var("MEXC_API_SECRET").ok().unwrap_or_default();
+    let is_real_credential = |v: &str| {
+        !v.is_empty()
+            && !v.starts_with("your_")
+            && !v.contains("placeholder")
+            && !v.eq_ignore_ascii_case("changeme")
+    };
+    if is_real_credential(&mexc_key) && is_real_credential(&mexc_secret) {
+        let mexc_client = Arc::new(MexcClient::new(mexc_key, mexc_secret));
+        position_manager.set_mexc_client(mexc_client).await;
+        info!("✅ MEXC API client connected (Live trading ready)");
+    } else {
+        tracing::warn!(
+            "⚠️ MEXC_API_KEY/MEXC_API_SECRET not set (or placeholder) — \
+             Live trading disabled. Emulation (paper) mode will still work."
+        );
     }
 
     // Enable trading by default for emulation mode
