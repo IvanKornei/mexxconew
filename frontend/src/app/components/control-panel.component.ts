@@ -1,4 +1,4 @@
-import { Component, signal, inject } from '@angular/core';
+import { Component, signal, inject, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MarketDataService } from '../services/market-data.service';
 
@@ -260,8 +260,9 @@ export class ControlPanelComponent {
   showLiveWarning = signal(false);
   
   constructor() {
-    // Подписываемся на состояние системы
-    this.marketDataService.systemState$.subscribe(state => {
+    // Реактивно отслеживаем состояние системы через signal effect
+    effect(() => {
+      const state = this.marketDataService.systemState();
       if (state) {
         this.isRunning.set(state.is_running);
         this.currentMode.set(state.mode as 'Emulation' | 'Live');

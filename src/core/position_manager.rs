@@ -36,19 +36,33 @@ pub struct PositionManager {
     // Клиенты для исполнения ордеров (прямые REST API)
     mexc_client: Arc<RwLock<Option<Arc<MexcClient>>>>,
     binance_client: Arc<RwLock<Option<Arc<BinanceClient>>>>,
-    
+
+    // Символ на MEXC (например, BTC_USDT, ETH_USDT, SOL_USDT)
+    mexc_symbol: String,
+    /// Метка инструмента для логов (BTC, ETH, SOL)
+    pub label: String,
+
     // Метрики производительности
     market_state_metrics: Arc<LatencyMetrics>,
     position_update_metrics: Arc<LatencyMetrics>,
 }
 
 impl PositionManager {
-    pub fn new(capital: f64, position_size_percent: f64, leverage: f64, max_positions: usize) -> Self {
-        info!("💰 Position manager initialized | Capital: ${} | Position: {}% | Leverage: {}x", 
-              capital, position_size_percent, leverage);
-        
+    pub fn new(
+        capital: f64,
+        position_size_percent: f64,
+        leverage: f64,
+        max_positions: usize,
+        mexc_symbol: String,
+        label: String,
+    ) -> Self {
+        info!(
+            "💰 Position manager [{}] initialized | Capital: ${} | Position: {}% | Leverage: {}x",
+            label, capital, position_size_percent, leverage
+        );
+
         let capital_manager = CapitalManager::new(capital, position_size_percent / 100.0, leverage);
-        
+
         Self {
             strategy: Arc::new(RwLock::new(ImpulseStrategy::default())),
             positions: Arc::new(RwLock::new(HashMap::new())),
@@ -61,6 +75,8 @@ impl PositionManager {
             trading_mode_manager: Arc::new(RwLock::new(None)),
             mexc_client: Arc::new(RwLock::new(None)),
             binance_client: Arc::new(RwLock::new(None)),
+            mexc_symbol,
+            label,
             market_state_metrics: Arc::new(LatencyMetrics::new()),
             position_update_metrics: Arc::new(LatencyMetrics::new()),
         }
@@ -513,7 +529,7 @@ impl PositionManager {
             .ok_or_else(|| format!("Invalid quantity: {}", position.quantity))?;
 
         let order_request = OrderRequest {
-            symbol: "BTC_USDT".to_string(),
+            symbol: self.mexc_symbol.clone(),
             side,
             order_type: OrderType::Market,
             quantity,
@@ -543,7 +559,7 @@ impl PositionManager {
             .ok_or_else(|| format!("Invalid quantity: {}", position.quantity))?;
 
         let order_request = OrderRequest {
-            symbol: "BTC_USDT".to_string(),
+            symbol: self.mexc_symbol.clone(),
             side,
             order_type: OrderType::Market,
             quantity,

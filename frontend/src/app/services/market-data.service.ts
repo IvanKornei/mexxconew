@@ -1,7 +1,8 @@
-import { Injectable } from '@angular/core';
-import { toSignal } from '@angular/core/rxjs-interop';
-import { Subject } from 'rxjs';
+import { Injectable, Signal, computed, signal } from '@angular/core';
 import { Position } from '../components/positions-panel.component';
+
+export const TRADING_SYMBOLS = ['BTC', 'ETH', 'SOL'] as const;
+export type TradingSymbol = typeof TRADING_SYMBOLS[number];
 
 export interface MarketData {
   binance: number;
@@ -77,24 +78,50 @@ export interface SystemState {
   };
 }
 
+const DEFAULT_MARKET_DATA: MarketData = {
+  binance: 0,
+  mexc: 0,
+  spread: 0,
+  is_stale: true,
+  latency_ms: 0,
+  binance_timestamp: 0,
+  mexc_timestamp: 0,
+  system_timestamp: 0,
+  mexc_lag_ms: 0,
+  price_diff: 0,
+  price_diff_percent: 0,
+  binance_received_at: 0,
+  mexc_received_at: 0,
+  real_lag_ms: 0,
+  is_scalping_opportunity: false,
+  potential_profit_percent: 0
+};
+
 @Injectable({
   providedIn: 'root'
 })
 export class MarketDataService {
   private ws: WebSocket | null = null;
-  private dataSubject = new Subject<MarketData>();
-  private historySubject = new Subject<MarketData[]>();
-  private positionsSubject = new Subject<Position[]>();
-  private tradingStatsSubject = new Subject<TradingStats | null>();
-  private recentTradesSubject = new Subject<TradeRecord[]>();
-  private systemStateSubject = new Subject<SystemState | null>();
-  
-  public systemState$ = this.systemStateSubject.asObservable();
-  
-  private history: MarketData[] = [];
-  private positions: Position[] = [];
+
+  // Состояние, разбитое по символам
+  private marketBySymbol = signal<Record<string, MarketData>>({});
+  private historyBySymbol = signal<Record<string, MarketData[]>>({});
+  private positionsBySymbol = signal<Record<string, Position[]>>({});
+  private tradingStatsBySymbol = signal<Record<string, TradingStats | null>>({});
+  private recentTradesBySymbol = signal<Record<string, TradeRecord[]>>({});
+  private systemStateSignal = signal<SystemState | null>(null);
+
+  public systemState = computed(() => this.systemStateSignal());
+
   private readonly MAX_HISTORY = 50;
-  
+
+  // Кэш сигналов по символам (чтобы computed не пересоздавались на каждый вызов)
+  private symbolDataCache: Record<string, Signal<MarketData>> = {};
+  private symbolHistoryCache: Record<string, Signal<MarketData[]>> = {};
+  private symbolPositionsCache: Record<string, Signal<Position[]>> = {};
+  private symbolStatsCache: Record<string, Signal<TradingStats | null>> = {};
+  private symbolTradesCache: Record<string, Signal<TradeRecord[]>> = {};
+
   // Trading settings (can be updated)
   public tradingSettings = {
     capital: 10,
@@ -105,72 +132,78 @@ export class MarketDataService {
     takeProfitPercent: 0.04,
     stopLossPercent: 0.02
   };
-  
-  get positionSize(): number {
-    const effectiveCapital = this.tradingSettings.capital * this.tradingSettings.leverage;
-    // Use 50% of effective capital per position
-    return (effectiveCapital * 0.5) / 67000; // Approximate BTC price
-  }
-  
-  public data = toSignal(this.dataSubject, {
-    initialValue: {
-      binance: 0,
-      mexc: 0,
-      spread: 0,
-      is_stale: true,
-      latency_ms: 0,
-      binance_timestamp: 0,
-      mexc_timestamp: 0,
-      system_timestamp: 0,
-      mexc_lag_ms: 0,
-      price_diff: 0,
-      price_diff_percent: 0,
-      binance_received_at: 0,
-      mexc_received_at: 0,
-      real_lag_ms: 0,
-      is_scalping_opportunity: false,
-      potential_profit_percent: 0
-    }
-  });
-  
-  public historyData = toSignal(this.historySubject, {
-    initialValue: []
-  });
-  
-  public positionsData = toSignal(this.positionsSubject, {
-    initialValue: []
-  });
-  
-  public tradingStatsData = toSignal(this.tradingStatsSubject, {
-    initialValue: null
-  });
-  
-  public recentTradesData = toSignal(this.recentTradesSubject, {
-    initialValue: []
-  });
-  
+
   constructor() {
     this.connect();
   }
-  
+
+  /** Сигнал с рыночными данными конкретного символа (BTC/ETH/SOL) */
+  public symbolData(label: string): Signal<MarketData> {
+    if (!this.symbolDataCache[label]) {
+      this.symbolDataCache[label] = computed(() =>
+        this.marketBySymbol()[label] ?? DEFAULT_MARKET_DATA
+      );
+    }
+    return this.symbolDataCache[label];
+  }
+
+  /** Сигнал истории котировок по символу */
+  public symbolHistory(label: string): Signal<MarketData[]> {
+    if (!this.symbolHistoryCache[label]) {
+      this.symbolHistoryCache[label] = computed(() =>
+        this.historyBySymbol()[label] ?? []
+      );
+    }
+    return this.symbolHistoryCache[label];
+  }
+
+  /** Сигнал позиций по символу */
+  public symbolPositions(label: string): Signal<Position[]> {
+    if (!this.symbolPositionsCache[label]) {
+      this.symbolPositionsCache[label] = computed(() =>
+        this.positionsBySymbol()[label] ?? []
+      );
+    }
+    return this.symbolPositionsCache[label];
+  }
+
+  /** Сигнал торговой статистики по символу */
+  public symbolTradingStats(label: string): Signal<TradingStats | null> {
+    if (!this.symbolStatsCache[label]) {
+      this.symbolStatsCache[label] = computed(() =>
+        this.tradingStatsBySymbol()[label] ?? null
+      );
+    }
+    return this.symbolStatsCache[label];
+  }
+
+  /** Сигнал истории сделок по символу */
+  public symbolRecentTrades(label: string): Signal<TradeRecord[]> {
+    if (!this.symbolTradesCache[label]) {
+      this.symbolTradesCache[label] = computed(() =>
+        this.recentTradesBySymbol()[label] ?? []
+      );
+    }
+    return this.symbolTradesCache[label];
+  }
+
   private connect(): void {
     const wsUrl = 'ws://localhost:3001/ws';
     console.log('Connecting to WebSocket:', wsUrl);
-    
+
     this.ws = new WebSocket(wsUrl);
-    
+
     this.ws.onopen = () => {
       console.log('WebSocket connected');
     };
-    
+
     this.ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        
-        // Проверяем тип сообщения
+
+        // Системное состояние
         if (data.type === 'systemState') {
-          // Обновление состояния системы
-          this.systemStateSubject.next({
+          this.systemStateSignal.set({
             is_running: data.is_running,
             mode: data.mode,
             last_updated: data.last_updated,
@@ -178,125 +211,80 @@ export class MarketDataService {
           });
           return;
         }
-        
+
         if (data.type === 'error') {
           console.error('Server error:', data.message);
           return;
         }
-        
-        // Обычное сообщение с данными рынка
-        const marketData: MarketData = data;
-        this.dataSubject.next(marketData);
-        
-        // Обновляем позиции если они пришли
-        if (marketData.positions) {
-          this.positions = marketData.positions;
-          this.positionsSubject.next([...this.positions]);
+
+        // Composite multi-symbol сообщение
+        if (data.type === 'marketData' && data.symbols) {
+          this.handleCompositeMessage(data.symbols);
+          return;
         }
-        
-        // Обновляем статистику из базы данных
-        if (marketData.trading_stats) {
-          this.tradingStatsSubject.next(marketData.trading_stats);
-        }
-        
-        // Обновляем историю сделок
-        if (marketData.recent_trades) {
-          this.recentTradesSubject.next(marketData.recent_trades);
-        }
-        
-        this.history.unshift(marketData);
-        if (this.history.length > this.MAX_HISTORY) {
-          this.history.pop();
-        }
-        this.historySubject.next([...this.history]);
-        
-        this.processMarketData(marketData);
       } catch (error) {
         console.error('Failed to parse WebSocket message:', error);
       }
     };
-    
+
     this.ws.onerror = (error) => {
       console.error('WebSocket error:', error);
     };
-    
+
     this.ws.onclose = () => {
       console.log('WebSocket disconnected, reconnecting in 2s...');
       setTimeout(() => this.connect(), 2000);
     };
   }
-  
-  private processMarketData(data: MarketData): void {
-    this.positions = this.positions.map(pos => {
-      const updated = { ...pos };
-      updated.current_price = data.mexc;
-      
-      if (pos.side === 'Long' && data.mexc > pos.highest_price) {
-        updated.highest_price = data.mexc;
-        const profit = updated.highest_price - updated.entry_price;
-        updated.trailing_stop = updated.entry_price + (profit * 0.5);
-      } else if (pos.side === 'Short' && data.mexc < pos.lowest_price) {
-        updated.lowest_price = data.mexc;
-        const profit = updated.entry_price - updated.lowest_price;
-        updated.trailing_stop = updated.entry_price - (profit * 0.5);
+
+  /** Обрабатывает composite сообщение со всеми символами */
+  private handleCompositeMessage(symbols: Record<string, MarketData>): void {
+    const marketNext = { ...this.marketBySymbol() };
+    const historyNext = { ...this.historyBySymbol() };
+    const positionsNext = { ...this.positionsBySymbol() };
+    const statsNext = { ...this.tradingStatsBySymbol() };
+    const tradesNext = { ...this.recentTradesBySymbol() };
+
+    for (const label of Object.keys(symbols)) {
+      const md = symbols[label];
+      marketNext[label] = md;
+
+      // История
+      const existingHistory = historyNext[label] ?? [];
+      const newHistory = [md, ...existingHistory];
+      if (newHistory.length > this.MAX_HISTORY) {
+        newHistory.length = this.MAX_HISTORY;
       }
-      
-      return updated;
-    });
-    
-    this.positions = this.positions.filter(pos => {
-      const stopLossPercent = this.tradingSettings.stopLossPercent;
-      
-      if (pos.side === 'Long') {
-        const lossPercent = ((pos.current_price - pos.entry_price) / pos.entry_price) * 100;
-        if (pos.current_price <= pos.trailing_stop || lossPercent <= -stopLossPercent) {
-          console.log(`Position ${pos.id} closed by stop loss`);
-          return false;
-        }
-      } else {
-        const lossPercent = ((pos.entry_price - pos.current_price) / pos.entry_price) * 100;
-        if (pos.current_price >= pos.trailing_stop || lossPercent <= -stopLossPercent) {
-          console.log(`Position ${pos.id} closed by stop loss`);
-          return false;
-        }
+      historyNext[label] = newHistory;
+
+      // Позиции
+      if (md.positions) {
+        positionsNext[label] = md.positions;
       }
-      return true;
-    });
-    
-    // Check for new entry with settings
-    if (this.positions.length < this.tradingSettings.maxPositions && 
-        data.is_scalping_opportunity &&
-        Math.abs(data.price_diff_percent) >= this.tradingSettings.momentumThreshold &&
-        Math.abs(data.mexc_lag_ms) >= 200) {
-      
-      const side: 'Long' | 'Short' = data.binance > data.mexc ? 'Long' : 'Short';
-      
-      const newPosition: Position = {
-        id: `pos_${Date.now()}`,
-        entry_price: data.mexc,
-        current_price: data.mexc,
-        quantity: this.positionSize,
-        side,
-        entry_time: data.system_timestamp,
-        initial_impulse: Math.abs(data.price_diff_percent),
-        trailing_stop: data.mexc,
-        highest_price: data.mexc,
-        lowest_price: data.mexc,
-        status: 'Open'
-      };
-      
-      this.positions.push(newPosition);
-      console.log(`New ${side} position opened at ${data.mexc} (${this.positionSize} BTC)`);
+
+      // Trading stats
+      if (md.trading_stats) {
+        statsNext[label] = md.trading_stats;
+      }
+
+      // Recent trades
+      if (md.recent_trades) {
+        tradesNext[label] = md.recent_trades;
+      }
     }
-    
-    this.positionsSubject.next([...this.positions]);
+
+    this.marketBySymbol.set(marketNext);
+    this.historyBySymbol.set(historyNext);
+    this.positionsBySymbol.set(positionsNext);
+    this.tradingStatsBySymbol.set(statsNext);
+    this.recentTradesBySymbol.set(tradesNext);
   }
-  
+
   updateSettings(settings: any) {
     this.tradingSettings = { ...this.tradingSettings, ...settings };
     console.log('Trading settings updated:', this.tradingSettings);
   }
-  
+
   // Отправляет настройки стратегии на бэкенд
   applyStrategySettings(settings: {
     momentum_weight: number;
@@ -316,7 +304,7 @@ export class MarketDataService {
       console.error('WebSocket not connected, cannot send settings');
     }
   }
-  
+
   // Отправляет настройки капитала на бэкенд
   applyCapitalSettings(settings: {
     capital: number;
@@ -335,14 +323,14 @@ export class MarketDataService {
       console.error('WebSocket not connected, cannot send capital settings');
     }
   }
-  
+
   disconnect(): void {
     if (this.ws) {
       this.ws.close();
       this.ws = null;
     }
   }
-  
+
   // Методы управления системой
   startTrading(): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -351,7 +339,7 @@ export class MarketDataService {
       console.log('Start trading command sent');
     }
   }
-  
+
   stopTrading(): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       const command = { type: 'stopTrading' };
@@ -359,10 +347,10 @@ export class MarketDataService {
       console.log('Stop trading command sent');
     }
   }
-  
+
   switchMode(mode: 'Emulation' | 'Live'): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      const command = { 
+      const command = {
         type: 'switchMode',
         mode: mode.toLowerCase()
       };
@@ -370,7 +358,7 @@ export class MarketDataService {
       console.log('Switch mode command sent:', mode);
     }
   }
-  
+
   getSystemState(): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       const command = { type: 'getSystemState' };

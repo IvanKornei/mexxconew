@@ -39,15 +39,17 @@ struct MexcResponse {
 
 pub struct MexcFuturesConnector {
     url: String,
+    symbol: String,
     max_reconnect_attempts: u32,
     circuit_breaker: CircuitBreaker,
     health_checker: Option<HealthChecker>,
 }
 
 impl MexcFuturesConnector {
-    pub fn new(url: String) -> Self {
+    pub fn new(url: String, symbol: String) -> Self {
         Self {
             url,
+            symbol,
             max_reconnect_attempts: 5,
             circuit_breaker: CircuitBreaker::new(Default::default()),
             health_checker: None,
@@ -122,12 +124,15 @@ impl MexcFuturesConnector {
         
         // Pre-allocate messages to avoid repeated allocations (HFT optimization)
         let ping_msg = Message::Text(r#"{"method":"ping"}"#.to_string());
-        let subscribe_msg = Message::Text(r#"{"method":"sub.deal","param":{"symbol":"BTC_USDT"}}"#.to_string());
-        
+        let subscribe_msg = Message::Text(format!(
+            r#"{{"method":"sub.deal","param":{{"symbol":"{}"}}}}"#,
+            self.symbol
+        ));
+
         // Send subscription
-        info!("Sending MEXC subscription");
+        info!("Sending MEXC subscription for {}", self.symbol);
         let mut write_guard = write;
-        
+
         // Добавляем таймаут на отправку подписки (5 секунд)
         tokio::time::timeout(
             Duration::from_secs(5),
@@ -137,7 +142,7 @@ impl MexcFuturesConnector {
                 operation: "subscribe".to_string(),
                 timeout_ms: 5000
             })??;
-        info!("Subscribed to MEXC Futures BTC_USDT trades");
+        info!("Subscribed to MEXC Futures {} trades", self.symbol);
         
         // Use Arc<Mutex> for safe shared write access between tasks
         let write_shared = std::sync::Arc::new(tokio::sync::Mutex::new(write_guard));

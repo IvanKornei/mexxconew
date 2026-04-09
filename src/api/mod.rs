@@ -1,3 +1,3 @@
 pub mod websocket;
 
-pub use websocket::WsServer;
+pub use websocket::{SymbolContext, WsServer};

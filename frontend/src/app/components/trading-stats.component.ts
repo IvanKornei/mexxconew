@@ -1,6 +1,6 @@
-import { Component, Signal } from '@angular/core';
+import { Component, Input, Signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { MarketDataService, TradingStats, TradeRecord } from '../services/market-data.service';
+import { TradingStats, TradeRecord } from '../services/market-data.service';
 
 @Component({
   selector: 'app-trading-stats',
@@ -156,13 +156,8 @@ import { MarketDataService, TradingStats, TradeRecord } from '../services/market
   styles: []
 })
 export class TradingStatsComponent {
-  stats: Signal<TradingStats | null>;
-  recentTrades: Signal<TradeRecord[]>;
-  
-  constructor(private marketDataService: MarketDataService) {
-    this.stats = this.marketDataService.tradingStatsData;
-    this.recentTrades = this.marketDataService.recentTradesData;
-  }
+  @Input({ required: true }) stats!: Signal<TradingStats | null>;
+  @Input({ required: true }) recentTrades!: Signal<TradeRecord[]>;
   
   projectedDaily(): number {
     const s = this.stats();
