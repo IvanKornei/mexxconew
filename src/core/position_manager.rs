@@ -133,12 +133,31 @@ impl PositionManager {
             self.position_update_metrics.record(update_start);
             
             if should_close {
+                // Для Live: отправляем обратный market-ордер на MEXC, прежде чем забыть позицию.
+                // Если биржевой ордер не прошёл — позицию всё равно убираем локально, чтобы не
+                // блокировать движок; в логах останется WARN для ручного разбирательства.
+                let execution_mode = *self.execution_mode.read().await;
+                if execution_mode == TradingMode::Live {
+                    match self.execute_live_close(&position).await {
+                        Ok(order_id) => {
+                            info!("✅ Live close executed on MEXC: {} (position {})", order_id, id);
+                        }
+                        Err(e) => {
+                            warn!(
+                                "❌ Failed to execute live close for {}: {}. Position will be \
+                                 removed from local state — verify manually on MEXC!",
+                                id, e
+                            );
+                        }
+                    }
+                }
+
                 // PnL в USD (разница цен * количество BTC)
                 // Leverage УЖЕ учтен в размере позиции (quantity), не нужно умножать еще раз!
                 let pnl = strategy.calculate_pnl(&position);
                 let pnl_percent = strategy.calculate_pnl_percent(&position);
                 let duration_ms = chrono::Utc::now().timestamp_millis() - position.entry_time;
-                
+
                 info!(
                     "💰 CLOSED | {} | {:?} | Entry: {:.2} | Exit: {:.2} | PnL: ${:.2} ({:.3}%) | {:?} | {}ms",
                     id, position.side, position.entry_price, position.current_price,
@@ -504,6 +523,36 @@ impl PositionManager {
         match client.place_order(order_request).await {
             Ok(order) => Ok(order.id),
             Err(e) => Err(format!("MEXC order failed: {}", e)),
+        }
+    }
+
+    /// Закрывает реальную позицию на MEXC обратным market-ордером
+    async fn execute_live_close(&self, position: &Position) -> Result<String, String> {
+        // Закрытие = обратная сторона
+        let side = match position.side {
+            crate::core::trading_strategy::PositionSide::Long => OrderSide::Sell,
+            crate::core::trading_strategy::PositionSide::Short => OrderSide::Buy,
+        };
+
+        let client_guard = self.mexc_client.read().await;
+        let client = client_guard
+            .as_ref()
+            .ok_or_else(|| "MEXC API client not configured".to_string())?;
+
+        let quantity = Decimal::from_f64_retain(position.quantity)
+            .ok_or_else(|| format!("Invalid quantity: {}", position.quantity))?;
+
+        let order_request = OrderRequest {
+            symbol: "BTC_USDT".to_string(),
+            side,
+            order_type: OrderType::Market,
+            quantity,
+            price: None,
+        };
+
+        match client.place_order(order_request).await {
+            Ok(order) => Ok(order.id),
+            Err(e) => Err(format!("MEXC close order failed: {}", e)),
         }
     }
 }

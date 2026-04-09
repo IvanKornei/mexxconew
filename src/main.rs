@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use crate::api::WsServer;
 use crate::core::{PriceFeedManager, SystemManager, TradingModeManager};
+use crate::exchanges::client::ExchangeClient;
 use crate::exchanges::mexc_client::MexcClient;
 use crate::utils::{Config, SystemHealth, HealthChecker};
 
@@ -85,8 +86,27 @@ async fn main() -> anyhow::Result<()> {
     };
     if is_real_credential(&mexc_key) && is_real_credential(&mexc_secret) {
         let mexc_client = Arc::new(MexcClient::new(mexc_key, mexc_secret));
-        position_manager.set_mexc_client(mexc_client).await;
-        info!("✅ MEXC API client connected (Live trading ready)");
+
+        // Sanity check: дергаем баланс, чтобы убедиться что ключи рабочие.
+        // Если биржа отвечает ошибкой — НЕ подключаем клиент, чтобы случайный
+        // переход в Live не попытался торговать с невалидными ключами.
+        match mexc_client.get_balance("USDT").await {
+            Ok(balance) => {
+                info!(
+                    "✅ MEXC API keys validated | USDT free: {} | locked: {}",
+                    balance.free, balance.locked
+                );
+                position_manager.set_mexc_client(mexc_client).await;
+                info!("✅ MEXC API client connected (Live trading ready)");
+            }
+            Err(e) => {
+                tracing::error!(
+                    "❌ MEXC API key validation failed: {}. Live trading disabled. \
+                     Emulation (paper) mode will still work.",
+                    e
+                );
+            }
+        }
     } else {
         tracing::warn!(
             "⚠️ MEXC_API_KEY/MEXC_API_SECRET not set (or placeholder) — \
