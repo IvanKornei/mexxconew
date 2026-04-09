@@ -12,6 +12,9 @@ Cargo.lock
 *.db-wal
 *.db-journal
 
+# Ephemeral test databases
+/.kiro/test/
+
 # Logs
 /logs/
 *.log
