@@ -160,10 +160,15 @@ impl PositionManager {
                         }
                         Err(e) => {
                             warn!(
-                                "❌ Failed to execute live close for {}: {}. Position will be \
-                                 removed from local state — verify manually on MEXC!",
+                                "❌ Failed to execute live close for {}: {}. Position kept in \
+                                 local state for retry — verify manually on MEXC!",
                                 id, e
                             );
+                            // Не убираем позицию из локального состояния, чтобы не потерять
+                            // её окончательно. На следующем тике попытка закрытия повторится,
+                            // пока сделка действительно не будет закрыта на бирже.
+                            to_save.push((id, position.clone()));
+                            continue;
                         }
                     }
                 }
@@ -335,20 +340,29 @@ impl PositionManager {
                             position.id, side, position.entry_price, position_size_btc,
                             capital.get_current_capital(), avg_lag
                         );
-                        
-                        // Исполняем реальный ордер на MEXC
+
+                        // Исполняем реальный ордер на MEXC. КРИТИЧНО:
+                        // если биржа не подтвердила ордер — НЕ добавляем позицию
+                        // в локальный трекер, иначе получим «призрачную» позицию
+                        // без реальной экспозиции (или хуже — позицию в обратную
+                        // сторону, если retry попал после частичного fill).
                         match self.execute_live_order(&position).await {
                             Ok(order_id) => {
                                 info!("✅ Live order executed on MEXC: {}", order_id);
                             }
                             Err(e) => {
-                                warn!("❌ Failed to execute live order: {}. Position will be tracked as emulation.", e);
-                                // Продолжаем как emulation если не удалось
+                                warn!(
+                                    "❌ Live order rejected by MEXC: {}. Aborting open — \
+                                     no local position created.",
+                                    e
+                                );
+                                self.active_count.fetch_sub(1, Ordering::SeqCst);
+                                return;
                             }
                         }
                     }
                 }
-                
+
                 let mut positions = self.positions.write().await;
                 positions.insert(position.id.clone(), position);
             } else {
@@ -542,7 +556,10 @@ impl PositionManager {
         }
     }
 
-    /// Закрывает реальную позицию на MEXC обратным market-ордером
+    /// Закрывает реальную позицию на MEXC обратным reduce-only market-ордером.
+    ///
+    /// Используем `place_close_order`, чтобы MEXC обработал запрос как закрытие
+    /// позиции (side 2 или 4), а не как открытие встречной.
     async fn execute_live_close(&self, position: &Position) -> Result<String, String> {
         // Закрытие = обратная сторона
         let side = match position.side {
@@ -566,7 +583,7 @@ impl PositionManager {
             price: None,
         };
 
-        match client.place_order(order_request).await {
+        match client.place_close_order(order_request).await {
             Ok(order) => Ok(order.id),
             Err(e) => Err(format!("MEXC close order failed: {}", e)),
         }

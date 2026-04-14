@@ -135,11 +135,20 @@ async fn main() -> anyhow::Result<()> {
     // paper/emulation runs don't accidentally advertise Live trading as ready.
     let mexc_key = std::env::var("MEXC_API_KEY").ok().unwrap_or_default();
     let mexc_secret = std::env::var("MEXC_API_SECRET").ok().unwrap_or_default();
+    // Расширенная проверка, чтобы случайно не принять за ключ заглушку или
+    // обрезанное значение. Реальные MEXC API-ключи обычно >= 24 символов.
     let is_real_credential = |v: &str| {
-        !v.is_empty()
-            && !v.starts_with("your_")
-            && !v.contains("placeholder")
-            && !v.eq_ignore_ascii_case("changeme")
+        let v = v.trim();
+        if v.len() < 16 {
+            return false;
+        }
+        let lower = v.to_ascii_lowercase();
+        !lower.starts_with("your_")
+            && !lower.contains("placeholder")
+            && !lower.contains("changeme")
+            && !lower.contains("example")
+            && !lower.contains("<")
+            && !lower.contains(">")
     };
     if is_real_credential(&mexc_key) && is_real_credential(&mexc_secret) {
         let mexc_client = Arc::new(MexcClient::new(mexc_key, mexc_secret));
@@ -149,10 +158,38 @@ async fn main() -> anyhow::Result<()> {
         // переход в Live не попытался торговать с невалидными ключами.
         match mexc_client.get_balance("USDT").await {
             Ok(balance) => {
+                use rust_decimal::prelude::ToPrimitive;
+                let free_usdt = balance.free.to_f64().unwrap_or(0.0);
                 info!(
                     "✅ MEXC API keys validated | USDT free: {} | locked: {}",
                     balance.free, balance.locked
                 );
+
+                // Синхронизируем реальный баланс биржи с CapitalManager каждого
+                // символа. Это защищает от ситуации, когда config.toml содержит
+                // устаревшее значение (или пользователь пополнил/вывел средства
+                // без обновления конфига).
+                if free_usdt > 0.0 {
+                    for pm in &position_managers {
+                        pm.update_capital_settings(
+                            free_usdt,
+                            config.trading.position_size_percent,
+                            config.trading.leverage,
+                            config.trading.max_positions,
+                        )
+                        .await;
+                    }
+                    info!(
+                        "💰 Capital synced from MEXC balance: ${:.2} USDT (was ${:.2} in config)",
+                        free_usdt, config.trading.initial_capital
+                    );
+                } else {
+                    tracing::warn!(
+                        "⚠️ MEXC USDT balance is zero — Live trading will fail until the \
+                         futures wallet is funded."
+                    );
+                }
+
                 // Привязываем один и тот же клиент ко всем position managers
                 for pm in &position_managers {
                     pm.set_mexc_client(mexc_client.clone()).await;

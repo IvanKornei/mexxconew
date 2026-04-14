@@ -20,6 +20,34 @@ pub type ClientResult<T> = std::result::Result<T, ApiError>;
 #[allow(dead_code)]
 type HmacSha256 = Hmac<Sha256>;
 
+/// Коды направления ордера по MEXC Contract API v1.
+///
+/// Docs (`order/submit`): `side` — одно целое число:
+///   1 = open long
+///   2 = close short
+///   3 = open short
+///   4 = close long
+///
+/// Публичное API оставляем абстрактным (`OrderSide::Buy | Sell`) и
+/// транслируем здесь с учётом явного флага `reduce_only` для закрытий.
+fn mexc_side(side: OrderSide, reduce_only: bool) -> i32 {
+    match (side, reduce_only) {
+        (OrderSide::Buy, false) => 1,  // open long
+        (OrderSide::Sell, true) => 4,  // close long (выход из long через sell)
+        (OrderSide::Sell, false) => 3, // open short
+        (OrderSide::Buy, true) => 2,   // close short (выход из short через buy)
+    }
+}
+
+/// Коды типа ордера по MEXC Contract API v1.
+///   1 = Limit, 2 = Post Only, 3 = IOC, 4 = FOK, 5 = Market, 6 = Convert
+fn mexc_order_type(t: OrderType) -> i32 {
+    match t {
+        OrderType::Limit => 1,
+        OrderType::Market => 5,
+    }
+}
+
 #[allow(dead_code)]
 pub struct MexcClient {
     api_key: String,
@@ -28,12 +56,26 @@ pub struct MexcClient {
     base_url: String,
     // MEXC: 20 requests/second
     rate_limiter: RateLimiter<NotKeyed, InMemoryState, DefaultClock>,
+    // Плечо по умолчанию при открытии. Можно переопределить позже при
+    // необходимости. По умолчанию держим консервативное значение.
+    default_leverage: u32,
+    // openType: 1 = isolated margin, 2 = cross margin. Isolated безопаснее.
+    open_type: u8,
 }
 
 impl MexcClient {
     pub fn new(api_key: String, api_secret: String) -> Self {
+        Self::with_leverage(api_key, api_secret, 20, 1)
+    }
+
+    pub fn with_leverage(
+        api_key: String,
+        api_secret: String,
+        default_leverage: u32,
+        open_type: u8,
+    ) -> Self {
         let quota = Quota::per_second(nonzero!(20u32));
-        
+
         Self {
             api_key,
             api_secret,
@@ -43,65 +85,98 @@ impl MexcClient {
                 .unwrap(),
             base_url: "https://contract.mexc.com".to_string(),
             rate_limiter: RateLimiter::direct(quota),
+            default_leverage: default_leverage.max(1),
+            open_type: if open_type == 2 { 2 } else { 1 },
         }
     }
-    
+
     async fn check_rate_limit(&self) {
         self.rate_limiter.until_ready().await;
     }
-    
-    fn sign(&self, query: &str) -> String {
+
+    /// Подписывает payload через HMAC-SHA256 по правилам MEXC Contract API v1.
+    ///
+    /// Для POST-запросов payload = `api_key + timestamp + body_json_string`.
+    /// Для GET-запросов payload = `api_key + timestamp + sorted_query_string`.
+    /// Ключом HMAC выступает api_secret. Результат — lowercase hex.
+    fn sign(&self, payload: &str) -> String {
         let mut mac = HmacSha256::new_from_slice(self.api_secret.as_bytes())
             .expect("HMAC can take key of any size");
-        mac.update(query.as_bytes());
+        mac.update(payload.as_bytes());
         hex::encode(mac.finalize().into_bytes())
     }
-    
+
     fn timestamp() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_millis() as u64
     }
-}
 
-#[async_trait]
-impl ExchangeClient for MexcClient {
-    async fn place_order(&self, order: OrderRequest) -> ClientResult<Order> {
+    /// Генерирует уникальный client-order-id для идемпотентности. MEXC
+    /// отклоняет повторные `externalOid` в коротком окне, что защищает
+    /// от случайного двойного сабмита при ретраях.
+    fn generate_external_oid() -> String {
+        let ts = Self::timestamp();
+        let rand: u32 = rand::random();
+        format!("hft-{ts}-{rand:08x}")
+    }
+
+    /// Экспорт sign для тестов.
+    #[cfg(test)]
+    pub(crate) fn sign_for_test(&self, payload: &str) -> String {
+        self.sign(payload)
+    }
+
+    /// Закрывает позицию (reduce-only) на MEXC обратным ордером.
+    ///
+    /// `reduce_only=true` передаётся в `side`-mapping, так что MEXC
+    /// обрабатывает как "close" и не открывает встречную позицию.
+    pub async fn place_close_order(&self, order: OrderRequest) -> ClientResult<Order> {
+        self.place_order_inner(order, true).await
+    }
+
+    async fn place_order_inner(
+        &self,
+        order: OrderRequest,
+        reduce_only: bool,
+    ) -> ClientResult<Order> {
         self.check_rate_limit().await;
-        
+
         let timestamp = Self::timestamp();
-        let side = match order.side {
-            OrderSide::Buy => 1,
-            OrderSide::Sell => 2,
-        };
-        let order_type = match order.order_type {
-            OrderType::Limit => 1,
-            OrderType::Market => 2,
-        };
-        
-        let mut params = vec![
-            ("symbol", order.symbol.clone()),
-            ("side", side.to_string()),
-            ("type", order_type.to_string()),
-            ("vol", order.quantity.to_string()),
-            ("timestamp", timestamp.to_string()),
-        ];
-        
+        let side_code = mexc_side(order.side.clone(), reduce_only);
+        let type_code = mexc_order_type(order.order_type.clone());
+        let external_oid = Self::generate_external_oid();
+
+        // ВАЖНО: на MEXC futures `vol` — количество контрактов (целое).
+        // Конвертация BTC → контракты должна выполняться выше по стеку
+        // (см. PositionManager). Здесь quantity передаётся «как есть» —
+        // ожидается, что оно уже провалидировано под шаг инструмента.
+        let mut body = serde_json::json!({
+            "symbol": order.symbol,
+            "side": side_code,
+            "type": type_code,
+            "vol": order.quantity.to_string(),
+            "leverage": self.default_leverage,
+            "openType": self.open_type,
+            "externalOid": external_oid,
+        });
         if let Some(price) = order.price {
-            params.push(("price", price.to_string()));
+            body["price"] = serde_json::Value::String(price.to_string());
         }
-        
-        let query = params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<_>>()
-            .join("&");
-        
-        let signature = self.sign(&query);
-        
-        debug!("Placing MEXC order: {}", order.symbol);
-        
+
+        let body_str = serde_json::to_string(&body)
+            .map_err(|e| ApiError::ParseError(e.to_string()))?;
+
+        // Signature = HMAC-SHA256(secret, api_key + timestamp + body)
+        let payload = format!("{}{}{}", self.api_key, timestamp, body_str);
+        let signature = self.sign(&payload);
+
+        debug!(
+            "Placing MEXC order: symbol={} side={} type={} reduce_only={} oid={}",
+            order.symbol, side_code, type_code, reduce_only, external_oid
+        );
+
         let response = self
             .http_client
             .post(format!("{}/api/v1/private/order/submit", self.base_url))
@@ -109,34 +184,29 @@ impl ExchangeClient for MexcClient {
             .header("Request-Time", timestamp.to_string())
             .header("Signature", signature)
             .header("Content-Type", "application/json")
-            .json(&serde_json::json!({
-                "symbol": order.symbol,
-                "side": side,
-                "type": order_type,
-                "vol": order.quantity.to_string(),
-                "price": order.price.map(|p| p.to_string()),
-            }))
+            .body(body_str)
             .send()
             .await
             .map_err(|e| ApiError::RequestFailed(e.to_string()))?;
-        
+
         if !response.status().is_success() {
             let error_text = response.text().await.unwrap_or_default();
             return Err(ApiError::ExchangeError(error_text));
         }
-        
+
         let order_response: MexcOrderResponse = response
             .json()
             .await
             .map_err(|e| ApiError::ParseError(e.to_string()))?;
-        
-        if order_response.code != 0 {
+
+        if !order_response.success.unwrap_or(order_response.code == 0) {
             return Err(ApiError::ExchangeError(format!(
-                "MEXC error: {}",
+                "MEXC error [{}]: {}",
+                order_response.code,
                 order_response.msg.unwrap_or_default()
             )));
         }
-        
+
         Ok(Order {
             id: order_response.data.unwrap_or_default(),
             symbol: order.symbol,
@@ -144,16 +214,28 @@ impl ExchangeClient for MexcClient {
             filled_quantity: Decimal::ZERO,
         })
     }
-    
+}
+
+#[async_trait]
+impl ExchangeClient for MexcClient {
+    async fn place_order(&self, order: OrderRequest) -> ClientResult<Order> {
+        self.place_order_inner(order, false).await
+    }
+
     async fn cancel_order(&self, order_id: &str) -> ClientResult<()> {
         self.check_rate_limit().await;
-        
+
         let timestamp = Self::timestamp();
-        let query = format!("orderId={}&timestamp={}", order_id, timestamp);
-        let signature = self.sign(&query);
-        
+        // MEXC cancel ожидает массив id в JSON body.
+        let body = serde_json::json!([order_id]);
+        let body_str = serde_json::to_string(&body)
+            .map_err(|e| ApiError::ParseError(e.to_string()))?;
+
+        let payload = format!("{}{}{}", self.api_key, timestamp, body_str);
+        let signature = self.sign(&payload);
+
         debug!("Cancelling MEXC order: {}", order_id);
-        
+
         let response = self
             .http_client
             .post(format!("{}/api/v1/private/order/cancel", self.base_url))
@@ -161,28 +243,28 @@ impl ExchangeClient for MexcClient {
             .header("Request-Time", timestamp.to_string())
             .header("Signature", signature)
             .header("Content-Type", "application/json")
-            .json(&serde_json::json!({
-                "orderId": order_id,
-            }))
+            .body(body_str)
             .send()
             .await
             .map_err(|e| ApiError::RequestFailed(e.to_string()))?;
-        
+
         if !response.status().is_success() {
             let error_text = response.text().await.unwrap_or_default();
             return Err(ApiError::ExchangeError(error_text));
         }
-        
+
         Ok(())
     }
-    
+
     async fn get_balance(&self, asset: &str) -> ClientResult<Balance> {
         self.check_rate_limit().await;
-        
+
         let timestamp = Self::timestamp();
-        let query = format!("timestamp={}", timestamp);
-        let signature = self.sign(&query);
-        
+        // GET подписывается как api_key + timestamp + sorted_query_string.
+        // Для этого эндпоинта query пустой.
+        let payload = format!("{}{}", self.api_key, timestamp);
+        let signature = self.sign(&payload);
+
         let response = self
             .http_client
             .get(format!("{}/api/v1/private/account/assets", self.base_url))
@@ -192,30 +274,31 @@ impl ExchangeClient for MexcClient {
             .send()
             .await
             .map_err(|e| ApiError::RequestFailed(e.to_string()))?;
-        
+
         if !response.status().is_success() {
             let error_text = response.text().await.unwrap_or_default();
             return Err(ApiError::ExchangeError(error_text));
         }
-        
+
         let balance_response: MexcBalanceResponse = response
             .json()
             .await
             .map_err(|e| ApiError::ParseError(e.to_string()))?;
-        
-        if balance_response.code != 0 {
+
+        if !balance_response.success.unwrap_or(balance_response.code == 0) {
             return Err(ApiError::ExchangeError(format!(
-                "MEXC error: {}",
+                "MEXC error [{}]: {}",
+                balance_response.code,
                 balance_response.msg.unwrap_or_default()
             )));
         }
-        
+
         let balances = balance_response.data.unwrap_or_default();
         let balance = balances
             .into_iter()
             .find(|b| b.currency == asset)
             .ok_or_else(|| ApiError::ExchangeError(format!("Asset {} not found", asset)))?;
-        
+
         Ok(Balance {
             asset: balance.currency,
             free: balance.available_balance,
@@ -229,6 +312,7 @@ struct MexcOrderResponse {
     code: i32,
     msg: Option<String>,
     data: Option<String>,
+    success: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -236,6 +320,7 @@ struct MexcBalanceResponse {
     code: i32,
     msg: Option<String>,
     data: Option<Vec<MexcBalance>>,
+    success: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -244,4 +329,43 @@ struct MexcBalance {
     currency: String,
     available_balance: Decimal,
     frozen_balance: Decimal,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mexc_side_mapping_open_vs_close() {
+        // open long / open short
+        assert_eq!(mexc_side(OrderSide::Buy, false), 1);
+        assert_eq!(mexc_side(OrderSide::Sell, false), 3);
+        // close long (sell) / close short (buy)
+        assert_eq!(mexc_side(OrderSide::Sell, true), 4);
+        assert_eq!(mexc_side(OrderSide::Buy, true), 2);
+    }
+
+    #[test]
+    fn test_mexc_order_type_market_is_5() {
+        // MEXC contract использует 5 для market (не 2).
+        assert_eq!(mexc_order_type(OrderType::Market), 5);
+        assert_eq!(mexc_order_type(OrderType::Limit), 1);
+    }
+
+    #[test]
+    fn test_signature_is_deterministic_hex() {
+        let c = MexcClient::new("K".into(), "S".into());
+        let sig = c.sign_for_test("payload");
+        assert_eq!(sig.len(), 64);
+        assert!(sig.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_eq!(sig, c.sign_for_test("payload"));
+    }
+
+    #[test]
+    fn test_external_oid_is_unique() {
+        let a = MexcClient::generate_external_oid();
+        let b = MexcClient::generate_external_oid();
+        assert_ne!(a, b, "externalOid must be unique per call");
+        assert!(a.starts_with("hft-"));
+    }
 }

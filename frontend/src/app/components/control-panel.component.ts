@@ -1,6 +1,9 @@
-import { Component, signal, inject, effect } from '@angular/core';
+import { Component, signal, inject, effect, computed, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MarketDataService } from '../services/market-data.service';
+
+/** Порог «протухания» WS-соединения, после которого блокируем опасные операции. */
+const WS_STALE_THRESHOLD_MS = 5000;
 
 @Component({
   selector: 'app-control-panel',
@@ -29,22 +32,33 @@ import { MarketDataService } from '../services/market-data.service';
         </div>
       </div>
       
+      <!-- Connection Warning -->
+      @if (!isConnectionHealthy()) {
+        <div class="connection-warning mb-4">
+          <span class="warning-icon">📡</span>
+          <span>
+            {{ wsConnected() ? 'Данные устарели' : 'Нет соединения с сервером' }} —
+            управление торговлей заблокировано до восстановления связи.
+          </span>
+        </div>
+      }
+
       <!-- Control Buttons -->
       <div class="flex gap-3">
-        <button 
-          (click)="toggleTrading()" 
+        <button
+          (click)="toggleTrading()"
           class="control-btn"
           [class.btn-stop]="isRunning()"
           [class.btn-start]="!isRunning()"
-          [disabled]="isProcessing()">
+          [disabled]="isProcessing() || !canOperate()">
           <span class="btn-icon">{{ isRunning() ? '⏸' : '▶' }}</span>
           <span>{{ isRunning() ? 'Остановить' : 'Запустить' }}</span>
         </button>
-        
-        <button 
-          (click)="switchMode()" 
+
+        <button
+          (click)="switchMode()"
           class="control-btn btn-mode"
-          [disabled]="isRunning() || isProcessing()">
+          [disabled]="isRunning() || isProcessing() || !canOperate()">
           <span class="btn-icon">🔄</span>
           <span>Переключить режим</span>
         </button>
@@ -188,6 +202,22 @@ import { MarketDataService } from '../services/market-data.service';
       }
     }
     
+    .connection-warning {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      background: rgba(234, 179, 8, 0.12);
+      border: 1px solid rgba(234, 179, 8, 0.35);
+      border-radius: 8px;
+      color: #facc15;
+      font-size: 13px;
+
+      .warning-icon {
+        font-size: 18px;
+      }
+    }
+
     .warning-box {
       display: flex;
       gap: 12px;
@@ -251,14 +281,32 @@ import { MarketDataService } from '../services/market-data.service';
     }
   `]
 })
-export class ControlPanelComponent {
+export class ControlPanelComponent implements OnDestroy {
   private marketDataService = inject(MarketDataService);
-  
+
   isRunning = signal(false);
   currentMode = signal<'Emulation' | 'Live'>('Emulation');
   isProcessing = signal(false);
   showLiveWarning = signal(false);
-  
+
+  // Тикер времени для пересчёта staleness (signals пересчитаются каждую секунду)
+  private nowTick = signal(Date.now());
+  private tickInterval = setInterval(() => this.nowTick.set(Date.now()), 1000);
+
+  // Пробрасываем для шаблона
+  wsConnected = this.marketDataService.wsConnected;
+
+  /** Свежее ли WS-соединение: сокет открыт и пакет пришёл < 5 секунд назад. */
+  isConnectionHealthy = computed(() => {
+    if (!this.marketDataService.wsConnected()) return false;
+    const last = this.marketDataService.lastMessageAt();
+    if (last === 0) return false;
+    return this.nowTick() - last < WS_STALE_THRESHOLD_MS;
+  });
+
+  /** Разрешено ли отправлять команды управления торговлей. */
+  canOperate = computed(() => this.isConnectionHealthy());
+
   constructor() {
     // Реактивно отслеживаем состояние системы через signal effect
     effect(() => {
@@ -269,24 +317,38 @@ export class ControlPanelComponent {
       }
     });
   }
+
+  ngOnDestroy(): void {
+    clearInterval(this.tickInterval);
+  }
   
   toggleTrading() {
     if (this.isProcessing()) return;
-    
+    // Страховка: даже если кнопка осталась активной по какой-то причине,
+    // запрещаем отправку команд при отсутствии свежих данных.
+    if (!this.canOperate()) {
+      console.warn('Cannot toggle trading — WS connection is stale or down');
+      return;
+    }
+
     this.isProcessing.set(true);
-    
+
     if (this.isRunning()) {
       this.marketDataService.stopTrading();
     } else {
       this.marketDataService.startTrading();
     }
-    
+
     // Сбрасываем флаг обработки через 1 секунду
     setTimeout(() => this.isProcessing.set(false), 1000);
   }
-  
+
   switchMode() {
     if (this.isRunning() || this.isProcessing()) return;
+    if (!this.canOperate()) {
+      console.warn('Cannot switch mode — WS connection is stale or down');
+      return;
+    }
     
     // Если переключаемся в Live - показываем предупреждение
     if (this.currentMode() === 'Emulation') {

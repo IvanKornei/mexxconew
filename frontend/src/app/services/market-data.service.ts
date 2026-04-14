@@ -111,7 +111,15 @@ export class MarketDataService {
   private recentTradesBySymbol = signal<Record<string, TradeRecord[]>>({});
   private systemStateSignal = signal<SystemState | null>(null);
 
+  // Состояние WebSocket-соединения и момент последнего полученного пакета
+  // котировок. Используется UI для блокировки опасных операций (в т.ч.
+  // Live-торговли), если соединение «протухло».
+  private wsConnectedSignal = signal(false);
+  private lastMessageAtSignal = signal<number>(0);
+
   public systemState = computed(() => this.systemStateSignal());
+  public wsConnected = computed(() => this.wsConnectedSignal());
+  public lastMessageAt = computed(() => this.lastMessageAtSignal());
 
   private readonly MAX_HISTORY = 50;
 
@@ -195,9 +203,12 @@ export class MarketDataService {
 
     this.ws.onopen = () => {
       console.log('WebSocket connected');
+      this.wsConnectedSignal.set(true);
+      this.lastMessageAtSignal.set(Date.now());
     };
 
     this.ws.onmessage = (event) => {
+      this.lastMessageAtSignal.set(Date.now());
       try {
         const data = JSON.parse(event.data);
 
@@ -233,6 +244,7 @@ export class MarketDataService {
 
     this.ws.onclose = () => {
       console.log('WebSocket disconnected, reconnecting in 2s...');
+      this.wsConnectedSignal.set(false);
       setTimeout(() => this.connect(), 2000);
     };
   }

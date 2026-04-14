@@ -115,19 +115,19 @@ impl TradingHistory {
     /// Записывает закрытую позицию в историю
     pub fn record_trade(&self, position: &Position, exit_price: f64, pnl: f64, pnl_percent: f64) -> SqlResult<()> {
         let conn = self.conn.lock().unwrap();
-        
+
         let side = match position.side {
             PositionSide::Long => "Long",
             PositionSide::Short => "Short",
         };
-        
+
         let status = match position.status {
             PositionStatus::Closed => "Closed",
             PositionStatus::StopLoss => "StopLoss",
             PositionStatus::TakeProfit => "TakeProfit",
             PositionStatus::Open => "Open",
         };
-        
+
         conn.execute(
             "INSERT INTO trades (position_id, side, entry_price, exit_price, quantity, entry_time, exit_time, pnl, pnl_percent, status, initial_impulse)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
@@ -145,16 +145,24 @@ impl TradingHistory {
                 position.initial_impulse,
             ],
         )?;
-        
-        // Обновляем баланс
-        let current_balance = self.get_current_balance()?;
+
+        // ВАЖНО: делаем всё через уже захваченный `conn`, чтобы не вызывать
+        // `get_current_balance` (который пытается взять тот же Mutex повторно —
+        // std::sync::Mutex нереентрантен и это вызывало deadlock).
+        let current_balance: f64 = conn
+            .query_row(
+                "SELECT balance FROM balance_history ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(self.initial_balance);
         let new_balance = current_balance + pnl;
-        
+
         conn.execute(
             "INSERT INTO balance_history (balance, timestamp) VALUES (?1, ?2)",
             [new_balance, chrono::Utc::now().timestamp_millis() as f64],
         )?;
-        
+
         info!(
             "📝 Trade recorded | {} | PnL: ${:.2} ({:.3}%) | New balance: ${:.2}",
             position.id,
@@ -162,7 +170,7 @@ impl TradingHistory {
             pnl_percent,
             new_balance
         );
-        
+
         Ok(())
     }
     
@@ -228,8 +236,16 @@ impl TradingHistory {
             [],
             |row| row.get(0),
         ).unwrap_or(0.0);
-        
-        let current_balance = self.get_current_balance().unwrap_or(self.initial_balance);
+
+        // ВАЖНО: читаем баланс через уже захваченный conn, чтобы не
+        // пытаться взять тот же Mutex повторно (deadlock).
+        let current_balance: f64 = conn
+            .query_row(
+                "SELECT balance FROM balance_history ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(self.initial_balance);
         
         let win_rate = if total_trades > 0 {
             (winning_trades as f64 / total_trades as f64) * 100.0
