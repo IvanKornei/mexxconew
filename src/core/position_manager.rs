@@ -12,8 +12,10 @@ use crate::core::PriceState;
 use crate::utils::LatencyMetrics;
 use crate::core::system_manager_optimized::TradingMode;
 use crate::core::trading_mode_manager::TradingModeManager;
-use crate::emulation::browser::BrowserActions;
 use crate::exchanges::binance_client::BinanceClient;
+use crate::exchanges::client::{ExchangeClient, OrderRequest, OrderSide, OrderType};
+use crate::exchanges::mexc_client::MexcClient;
+use rust_decimal::Decimal;
 
 /// Менеджер позиций с управлением капиталом
 pub struct PositionManager {
@@ -31,22 +33,36 @@ pub struct PositionManager {
     // Менеджер режимов торговли
     trading_mode_manager: Arc<RwLock<Option<Arc<TradingModeManager>>>>,
     
-    // Клиенты для исполнения ордеров
-    browser_actions: Arc<RwLock<Option<BrowserActions>>>,
+    // Клиенты для исполнения ордеров (прямые REST API)
+    mexc_client: Arc<RwLock<Option<Arc<MexcClient>>>>,
     binance_client: Arc<RwLock<Option<Arc<BinanceClient>>>>,
-    
+
+    // Символ на MEXC (например, BTC_USDT, ETH_USDT, SOL_USDT)
+    mexc_symbol: String,
+    /// Метка инструмента для логов (BTC, ETH, SOL)
+    pub label: String,
+
     // Метрики производительности
     market_state_metrics: Arc<LatencyMetrics>,
     position_update_metrics: Arc<LatencyMetrics>,
 }
 
 impl PositionManager {
-    pub fn new(capital: f64, position_size_percent: f64, leverage: f64, max_positions: usize) -> Self {
-        info!("💰 Position manager initialized | Capital: ${} | Position: {}% | Leverage: {}x", 
-              capital, position_size_percent, leverage);
-        
+    pub fn new(
+        capital: f64,
+        position_size_percent: f64,
+        leverage: f64,
+        max_positions: usize,
+        mexc_symbol: String,
+        label: String,
+    ) -> Self {
+        info!(
+            "💰 Position manager [{}] initialized | Capital: ${} | Position: {}% | Leverage: {}x",
+            label, capital, position_size_percent, leverage
+        );
+
         let capital_manager = CapitalManager::new(capital, position_size_percent / 100.0, leverage);
-        
+
         Self {
             strategy: Arc::new(RwLock::new(ImpulseStrategy::default())),
             positions: Arc::new(RwLock::new(HashMap::new())),
@@ -57,19 +73,21 @@ impl PositionManager {
             is_trading_enabled: Arc::new(RwLock::new(false)),
             execution_mode: Arc::new(RwLock::new(TradingMode::Emulation)),
             trading_mode_manager: Arc::new(RwLock::new(None)),
-            browser_actions: Arc::new(RwLock::new(None)),
+            mexc_client: Arc::new(RwLock::new(None)),
             binance_client: Arc::new(RwLock::new(None)),
+            mexc_symbol,
+            label,
             market_state_metrics: Arc::new(LatencyMetrics::new()),
             position_update_metrics: Arc::new(LatencyMetrics::new()),
         }
     }
     
-    /// Устанавливает BrowserActions для MEXC
-    pub async fn set_browser_actions(&self, browser: BrowserActions) {
-        *self.browser_actions.write().await = Some(browser);
-        info!("🌐 Browser actions connected to position manager");
+    /// Устанавливает MEXC REST клиент для реальных ордеров
+    pub async fn set_mexc_client(&self, client: Arc<MexcClient>) {
+        *self.mexc_client.write().await = Some(client);
+        info!("📡 MEXC API client connected to position manager");
     }
-    
+
     /// Устанавливает Binance client
     pub async fn set_binance_client(&self, client: Arc<BinanceClient>) {
         *self.binance_client.write().await = Some(client);
@@ -131,12 +149,36 @@ impl PositionManager {
             self.position_update_metrics.record(update_start);
             
             if should_close {
+                // Для Live: отправляем обратный market-ордер на MEXC, прежде чем забыть позицию.
+                // Если биржевой ордер не прошёл — позицию всё равно убираем локально, чтобы не
+                // блокировать движок; в логах останется WARN для ручного разбирательства.
+                let execution_mode = *self.execution_mode.read().await;
+                if execution_mode == TradingMode::Live {
+                    match self.execute_live_close(&position).await {
+                        Ok(order_id) => {
+                            info!("✅ Live close executed on MEXC: {} (position {})", order_id, id);
+                        }
+                        Err(e) => {
+                            warn!(
+                                "❌ Failed to execute live close for {}: {}. Position kept in \
+                                 local state for retry — verify manually on MEXC!",
+                                id, e
+                            );
+                            // Не убираем позицию из локального состояния, чтобы не потерять
+                            // её окончательно. На следующем тике попытка закрытия повторится,
+                            // пока сделка действительно не будет закрыта на бирже.
+                            to_save.push((id, position.clone()));
+                            continue;
+                        }
+                    }
+                }
+
                 // PnL в USD (разница цен * количество BTC)
                 // Leverage УЖЕ учтен в размере позиции (quantity), не нужно умножать еще раз!
                 let pnl = strategy.calculate_pnl(&position);
                 let pnl_percent = strategy.calculate_pnl_percent(&position);
                 let duration_ms = chrono::Utc::now().timestamp_millis() - position.entry_time;
-                
+
                 info!(
                     "💰 CLOSED | {} | {:?} | Entry: {:.2} | Exit: {:.2} | PnL: ${:.2} ({:.3}%) | {:?} | {}ms",
                     id, position.side, position.entry_price, position.current_price,
@@ -298,20 +340,29 @@ impl PositionManager {
                             position.id, side, position.entry_price, position_size_btc,
                             capital.get_current_capital(), avg_lag
                         );
-                        
-                        // Исполняем реальный ордер на MEXC
+
+                        // Исполняем реальный ордер на MEXC. КРИТИЧНО:
+                        // если биржа не подтвердила ордер — НЕ добавляем позицию
+                        // в локальный трекер, иначе получим «призрачную» позицию
+                        // без реальной экспозиции (или хуже — позицию в обратную
+                        // сторону, если retry попал после частичного fill).
                         match self.execute_live_order(&position).await {
                             Ok(order_id) => {
                                 info!("✅ Live order executed on MEXC: {}", order_id);
                             }
                             Err(e) => {
-                                warn!("❌ Failed to execute live order: {}. Position will be tracked as emulation.", e);
-                                // Продолжаем как emulation если не удалось
+                                warn!(
+                                    "❌ Live order rejected by MEXC: {}. Aborting open — \
+                                     no local position created.",
+                                    e
+                                );
+                                self.active_count.fetch_sub(1, Ordering::SeqCst);
+                                return;
                             }
                         }
                     }
                 }
-                
+
                 let mut positions = self.positions.write().await;
                 positions.insert(position.id.clone(), position);
             } else {
@@ -476,21 +527,65 @@ impl PositionManager {
         *self.execution_mode.read().await
     }
     
-    /// Исполняет реальный ордер на MEXC через browser
+    /// Исполняет реальный ордер на MEXC через REST API
     async fn execute_live_order(&self, position: &Position) -> Result<String, String> {
         let side = match position.side {
-            crate::core::trading_strategy::PositionSide::Long => "BUY",
-            crate::core::trading_strategy::PositionSide::Short => "SELL",
+            crate::core::trading_strategy::PositionSide::Long => OrderSide::Buy,
+            crate::core::trading_strategy::PositionSide::Short => OrderSide::Sell,
         };
-        
-        let mut browser_guard = self.browser_actions.write().await;
-        if let Some(ref mut browser) = *browser_guard {
-            match browser.place_market_order(side, position.quantity).await {
-                Ok(order_id) => Ok(order_id),
-                Err(e) => Err(format!("MEXC order failed: {}", e)),
-            }
-        } else {
-            Err("Browser not initialized".to_string())
+
+        let client_guard = self.mexc_client.read().await;
+        let client = client_guard
+            .as_ref()
+            .ok_or_else(|| "MEXC API client not configured".to_string())?;
+
+        let quantity = Decimal::from_f64_retain(position.quantity)
+            .ok_or_else(|| format!("Invalid quantity: {}", position.quantity))?;
+
+        let order_request = OrderRequest {
+            symbol: self.mexc_symbol.clone(),
+            side,
+            order_type: OrderType::Market,
+            quantity,
+            price: None,
+        };
+
+        match client.place_order(order_request).await {
+            Ok(order) => Ok(order.id),
+            Err(e) => Err(format!("MEXC order failed: {}", e)),
+        }
+    }
+
+    /// Закрывает реальную позицию на MEXC обратным reduce-only market-ордером.
+    ///
+    /// Используем `place_close_order`, чтобы MEXC обработал запрос как закрытие
+    /// позиции (side 2 или 4), а не как открытие встречной.
+    async fn execute_live_close(&self, position: &Position) -> Result<String, String> {
+        // Закрытие = обратная сторона
+        let side = match position.side {
+            crate::core::trading_strategy::PositionSide::Long => OrderSide::Sell,
+            crate::core::trading_strategy::PositionSide::Short => OrderSide::Buy,
+        };
+
+        let client_guard = self.mexc_client.read().await;
+        let client = client_guard
+            .as_ref()
+            .ok_or_else(|| "MEXC API client not configured".to_string())?;
+
+        let quantity = Decimal::from_f64_retain(position.quantity)
+            .ok_or_else(|| format!("Invalid quantity: {}", position.quantity))?;
+
+        let order_request = OrderRequest {
+            symbol: self.mexc_symbol.clone(),
+            side,
+            order_type: OrderType::Market,
+            quantity,
+            price: None,
+        };
+
+        match client.place_close_order(order_request).await {
+            Ok(order) => Ok(order.id),
+            Err(e) => Err(format!("MEXC close order failed: {}", e)),
         }
     }
 }

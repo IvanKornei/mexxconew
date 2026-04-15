@@ -12,12 +12,15 @@ pub struct PriceFeedManager {
     state_tx: watch::Sender<PriceState>,
     stale_timeout_ms: u64,
     position_manager: Arc<PositionManager>,
+    label: String,
 }
 
 impl PriceFeedManager {
     pub fn new(
         binance_url: String,
         mexc_url: String,
+        mexc_symbol: String,
+        label: String,
         stale_timeout_ms: u64,
         initial_capital: f64,
         position_size_percent: f64,
@@ -25,30 +28,35 @@ impl PriceFeedManager {
         max_positions: usize,
     ) -> (Self, watch::Receiver<PriceState>, Arc<PositionManager>) {
         let (state_tx, state_rx) = watch::channel(PriceState::default());
-        
+
         // Создаём менеджер позиций с настройками из конфига
         let position_manager = Arc::new(PositionManager::new(
             initial_capital,
             position_size_percent,
             leverage,
             max_positions,
+            mexc_symbol.clone(),
+            label.clone(),
         ));
-        
+
         let manager = Self {
             binance_connector: BinanceFuturesConnector::new(binance_url),
-            mexc_connector: MexcFuturesConnector::new(mexc_url),
+            mexc_connector: MexcFuturesConnector::new(mexc_url, mexc_symbol),
             state_tx,
             stale_timeout_ms,
             position_manager: position_manager.clone(),
+            label,
         };
-        
+
         (manager, state_rx, position_manager)
     }
-    
+
     /// Создаёт новый менеджер с health checkers для мониторинга
     pub fn new_with_health(
         binance_url: String,
         mexc_url: String,
+        mexc_symbol: String,
+        label: String,
         stale_timeout_ms: u64,
         initial_capital: f64,
         position_size_percent: f64,
@@ -58,25 +66,28 @@ impl PriceFeedManager {
         mexc_health: HealthChecker,
     ) -> (Self, watch::Receiver<PriceState>, Arc<PositionManager>) {
         let (state_tx, state_rx) = watch::channel(PriceState::default());
-        
+
         // Создаём менеджер позиций с настройками из конфига
         let position_manager = Arc::new(PositionManager::new(
             initial_capital,
             position_size_percent,
             leverage,
             max_positions,
+            mexc_symbol.clone(),
+            label.clone(),
         ));
-        
+
         let manager = Self {
             binance_connector: BinanceFuturesConnector::new(binance_url)
                 .with_health_checker(binance_health),
-            mexc_connector: MexcFuturesConnector::new(mexc_url)
+            mexc_connector: MexcFuturesConnector::new(mexc_url, mexc_symbol)
                 .with_health_checker(mexc_health),
             state_tx,
             stale_timeout_ms,
             position_manager: position_manager.clone(),
+            label,
         };
-        
+
         (manager, state_rx, position_manager)
     }
     

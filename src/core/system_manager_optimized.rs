@@ -94,8 +94,8 @@ pub struct SystemManager {
     is_running_fast: Arc<AtomicBool>,
     
     state_file_path: PathBuf,
-    position_manager: Arc<PositionManager>,
-    
+    position_managers: Vec<Arc<PositionManager>>,
+
     // Debouncer для батчинга сохранений
     save_task: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     
@@ -105,9 +105,9 @@ pub struct SystemManager {
 }
 
 impl SystemManager {
-    pub fn new(position_manager: Arc<PositionManager>) -> Self {
+    pub fn new(position_managers: Vec<Arc<PositionManager>>) -> Self {
         let state_file_path = PathBuf::from(".kiro/system_state.json");
-        
+
         Self {
             state: Arc::new(RwLock::new(InternalState {
                 is_running: false,
@@ -116,11 +116,16 @@ impl SystemManager {
             })),
             is_running_fast: Arc::new(AtomicBool::new(false)),
             state_file_path,
-            position_manager,
+            position_managers,
             save_task: Arc::new(RwLock::new(None)),
             save_latency: Arc::new(LatencyMetrics::new()),
             load_latency: Arc::new(LatencyMetrics::new()),
         }
+    }
+
+    /// Возвращает все управляемые position managers (для внешних компонентов: WS сервер, REST интеграции)
+    pub fn position_managers(&self) -> &[Arc<PositionManager>] {
+        &self.position_managers
     }
     
     /// Запускает торговлю (оптимизировано для минимальной задержки)
@@ -133,9 +138,11 @@ impl SystemManager {
         // Атомарный флаг для быстрой проверки
         self.is_running_fast.store(true, Ordering::Release);
         
-        // Активируем Position Manager
-        self.position_manager.set_trading_enabled(true).await;
-        
+        // Активируем все Position Managers
+        for pm in &self.position_managers {
+            pm.set_trading_enabled(true).await;
+        }
+
         info!("🚀 Trading started");
         
         // Сохраняем асинхронно без блокировки
@@ -153,9 +160,11 @@ impl SystemManager {
         
         self.is_running_fast.store(false, Ordering::Release);
         
-        // Деактивируем Position Manager
-        self.position_manager.set_trading_enabled(false).await;
-        
+        // Деактивируем все Position Managers
+        for pm in &self.position_managers {
+            pm.set_trading_enabled(false).await;
+        }
+
         info!("⏸️ Trading stopped");
         
         // Сохраняем асинхронно
@@ -176,9 +185,11 @@ impl SystemManager {
             state.mode = mode;
         }
         
-        // Обновляем режим в Position Manager
-        self.position_manager.set_execution_mode(mode).await;
-        
+        // Обновляем режим во всех Position Managers
+        for pm in &self.position_managers {
+            pm.set_execution_mode(mode).await;
+        }
+
         info!("🔄 Switched to {:?} mode", mode);
         
         // Сохраняем асинхронно
@@ -252,9 +263,11 @@ impl SystemManager {
                         
                         self.is_running_fast.store(loaded_state.is_running, Ordering::Release);
                         
-                        // Применяем к Position Manager
-                        self.position_manager.set_trading_enabled(loaded_state.is_running).await;
-                        self.position_manager.set_execution_mode(loaded_state.mode).await;
+                        // Применяем ко всем Position Managers
+                        for pm in &self.position_managers {
+                            pm.set_trading_enabled(loaded_state.is_running).await;
+                            pm.set_execution_mode(loaded_state.mode).await;
+                        }
                         
                         // Если режим Live и торговля запущена - предупреждение
                         if loaded_state.is_running && loaded_state.mode == TradingMode::Live {
@@ -401,21 +414,23 @@ impl SystemManager {
             state.trading_settings = Arc::new(settings.clone());
         }
         
-        // Применяем к Position Manager
-        self.position_manager.update_capital_settings(
-            settings.capital,
-            settings.position_size_percent,
-            settings.leverage,
-            settings.max_positions,
-        ).await;
-        
-        self.position_manager.update_strategy_settings(
-            settings.momentum_weight,
-            settings.lag_weight,
-            settings.price_diff_weight,
-            settings.momentum_threshold,
-            settings.quick_exit_timeout,
-        ).await;
+        // Применяем ко всем Position Managers
+        for pm in &self.position_managers {
+            pm.update_capital_settings(
+                settings.capital,
+                settings.position_size_percent,
+                settings.leverage,
+                settings.max_positions,
+            ).await;
+
+            pm.update_strategy_settings(
+                settings.momentum_weight,
+                settings.lag_weight,
+                settings.price_diff_weight,
+                settings.momentum_threshold,
+                settings.quick_exit_timeout,
+            ).await;
+        }
         
         info!("⚙️ Settings updated");
         
@@ -458,59 +473,70 @@ mod tests {
     use super::*;
     use crate::core::PositionManager;
     
+    fn make_pm() -> Arc<PositionManager> {
+        Arc::new(PositionManager::new(
+            100.0,
+            10.0,
+            200.0,
+            2,
+            "BTC_USDT".to_string(),
+            "BTC".to_string(),
+        ))
+    }
+
     #[tokio::test]
     async fn test_start_stop_trading() {
-        let pm = Arc::new(PositionManager::new(100.0, 10.0, 200.0, 2));
-        let sm = SystemManager::new(pm.clone());
-        
+        let pm = make_pm();
+        let sm = SystemManager::new(vec![pm.clone()]);
+
         // Изначально остановлена
         assert!(!sm.is_running().await);
         assert!(!sm.is_running_fast());
-        
+
         // Запускаем
         sm.start_trading().await.unwrap();
         assert!(sm.is_running().await);
         assert!(sm.is_running_fast());
         assert!(pm.is_trading_enabled().await);
-        
+
         // Останавливаем
         sm.stop_trading().await.unwrap();
         assert!(!sm.is_running().await);
         assert!(!sm.is_running_fast());
         assert!(!pm.is_trading_enabled().await);
     }
-    
+
     #[tokio::test]
     async fn test_switch_mode() {
-        let pm = Arc::new(PositionManager::new(100.0, 10.0, 200.0, 2));
-        let sm = SystemManager::new(pm.clone());
-        
+        let pm = make_pm();
+        let sm = SystemManager::new(vec![pm.clone()]);
+
         // Изначально Emulation
         assert_eq!(sm.get_mode().await, TradingMode::Emulation);
-        
+
         // Переключаем на Live
         sm.switch_mode(TradingMode::Live).await.unwrap();
         assert_eq!(sm.get_mode().await, TradingMode::Live);
         assert_eq!(pm.get_execution_mode().await, TradingMode::Live);
     }
-    
+
     #[tokio::test]
     async fn test_cannot_switch_mode_while_running() {
-        let pm = Arc::new(PositionManager::new(100.0, 10.0, 200.0, 2));
-        let sm = SystemManager::new(pm);
-        
+        let pm = make_pm();
+        let sm = SystemManager::new(vec![pm]);
+
         // Запускаем торговлю
         sm.start_trading().await.unwrap();
-        
+
         // Пытаемся переключить режим - должна быть ошибка
         let result = sm.switch_mode(TradingMode::Live).await;
         assert!(result.is_err());
     }
-    
+
     #[tokio::test]
     async fn test_settings_validation() {
-        let pm = Arc::new(PositionManager::new(100.0, 10.0, 200.0, 2));
-        let sm = SystemManager::new(pm);
+        let pm = make_pm();
+        let sm = SystemManager::new(vec![pm]);
         
         // Невалидный capital
         let mut settings = TradingSettings::default();

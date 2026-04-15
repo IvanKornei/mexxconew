@@ -7,6 +7,14 @@ Cargo.lock
 # Environment
 .env
 
+# SQLite ephemeral files (WAL/SHM/journal)
+*.db-shm
+*.db-wal
+*.db-journal
+
+# Ephemeral test databases
+/.kiro/test/
+
 # Logs
 /logs/
 *.log
