@@ -153,6 +153,28 @@ async fn main() -> anyhow::Result<()> {
     if is_real_credential(&mexc_key) && is_real_credential(&mexc_secret) {
         let mexc_client = Arc::new(MexcClient::new(mexc_key, mexc_secret));
 
+        // Подтягиваем спецификации контрактов (contract_size, min_vol) со
+        // MEXC — они нужны, чтобы конвертировать `quantity` в базовой валюте
+        // в целое число контрактов (`vol`). Без этого Live-ордера уходили бы
+        // с неверным объёмом и отклонялись биржей. Если хотя бы один символ
+        // не загрузился, клиент не прикрепляем и Live остаётся недоступен.
+        let mut contracts_ok = true;
+        for spec in SYMBOL_SPECS {
+            if let Err(e) = mexc_client.fetch_contract_detail(spec.mexc_symbol).await {
+                tracing::error!(
+                    "❌ Failed to load MEXC contract spec for {}: {}. Live trading disabled.",
+                    spec.mexc_symbol, e
+                );
+                contracts_ok = false;
+            }
+        }
+
+        if !contracts_ok {
+            tracing::warn!(
+                "⚠️ MEXC contract specs incomplete — Live client NOT attached. \
+                 Emulation (paper) mode continues to work."
+            );
+        } else {
         // Sanity check: дергаем баланс, чтобы убедиться что ключи рабочие.
         // Если биржа отвечает ошибкой — НЕ подключаем клиент, чтобы случайный
         // переход в Live не попытался торговать с невалидными ключами.
@@ -204,6 +226,7 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
+        } // end of `if contracts_ok`
     } else {
         tracing::warn!(
             "⚠️ MEXC_API_KEY/MEXC_API_SECRET not set (or placeholder) — \

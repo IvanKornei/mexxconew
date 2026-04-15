@@ -4,10 +4,13 @@ use hmac::{Hmac, Mac};
 use nonzero_ext::*;
 use reqwest::Client;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use serde::Deserialize;
 use sha2::Sha256;
+use std::collections::HashMap;
+use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::exchanges::client::{
     Balance, ExchangeClient, Order, OrderRequest, OrderSide, OrderStatus, OrderType,
@@ -48,6 +51,21 @@ fn mexc_order_type(t: OrderType) -> i32 {
     }
 }
 
+/// Спецификация контракта MEXC Futures, полученная из
+/// `GET /api/v1/contract/detail`. Нужна для корректной конвертации
+/// quantity (в базовой валюте, например BTC) → `vol` (целые контракты),
+/// который реально принимает биржа.
+#[derive(Debug, Clone)]
+pub struct ContractDetail {
+    pub symbol: String,
+    /// Размер одного контракта в базовой валюте (например, 0.0001 BTC).
+    pub contract_size: Decimal,
+    /// Минимальный размер ордера в контрактах.
+    pub min_vol: u64,
+    /// Максимальный размер ордера в контрактах (0 если не указано).
+    pub max_vol: u64,
+}
+
 #[allow(dead_code)]
 pub struct MexcClient {
     api_key: String,
@@ -61,6 +79,9 @@ pub struct MexcClient {
     default_leverage: u32,
     // openType: 1 = isolated margin, 2 = cross margin. Isolated безопаснее.
     open_type: u8,
+    /// Кэш характеристик контрактов, подтягиваемых с биржи на старте.
+    /// Используется для конвертации `quantity` в `vol` (кол-во контрактов).
+    contracts: RwLock<HashMap<String, ContractDetail>>,
 }
 
 impl MexcClient {
@@ -87,7 +108,152 @@ impl MexcClient {
             rate_limiter: RateLimiter::direct(quota),
             default_leverage: default_leverage.max(1),
             open_type: if open_type == 2 { 2 } else { 1 },
+            contracts: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Загружает характеристики контракта с MEXC и сохраняет их в кэш.
+    /// Публичный endpoint — не требует подписи.
+    pub async fn fetch_contract_detail(&self, symbol: &str) -> ClientResult<ContractDetail> {
+        self.check_rate_limit().await;
+
+        let url = format!("{}/api/v1/contract/detail?symbol={}", self.base_url, symbol);
+        let response = self
+            .http_client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| ApiError::RequestFailed(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(ApiError::ExchangeError(error_text));
+        }
+
+        let parsed: MexcContractDetailResponse = response
+            .json()
+            .await
+            .map_err(|e| ApiError::ParseError(e.to_string()))?;
+
+        if !parsed.success.unwrap_or(parsed.code == 0) {
+            return Err(ApiError::ExchangeError(format!(
+                "MEXC contract/detail [{}]: {}",
+                parsed.code,
+                parsed.msg.unwrap_or_default()
+            )));
+        }
+
+        // Endpoint без параметра symbol возвращает массив; с параметром — обычно
+        // один элемент, но MEXC иногда всё равно присылает массив, поэтому
+        // разбираем оба варианта.
+        let raw = parsed
+            .data
+            .into_iter()
+            .find(|c| c.symbol == symbol)
+            .ok_or_else(|| {
+                ApiError::ExchangeError(format!("MEXC contract {} not found", symbol))
+            })?;
+
+        let contract_size = Decimal::from_f64_retain(raw.contract_size).ok_or_else(|| {
+            ApiError::ParseError(format!(
+                "Invalid contractSize {} for {}",
+                raw.contract_size, symbol
+            ))
+        })?;
+
+        if contract_size.is_zero() {
+            return Err(ApiError::ParseError(format!(
+                "contractSize is zero for {}",
+                symbol
+            )));
+        }
+
+        let detail = ContractDetail {
+            symbol: raw.symbol,
+            contract_size,
+            min_vol: raw.min_vol.unwrap_or(1),
+            max_vol: raw.max_vol.unwrap_or(0),
+        };
+
+        self.contracts
+            .write()
+            .expect("contracts RwLock poisoned")
+            .insert(symbol.to_string(), detail.clone());
+
+        info!(
+            "📐 MEXC contract loaded | {} | contract_size={} | min_vol={} | max_vol={}",
+            detail.symbol, detail.contract_size, detail.min_vol, detail.max_vol
+        );
+
+        Ok(detail)
+    }
+
+    /// Возвращает копию кэшированной характеристики контракта.
+    pub fn get_cached_contract(&self, symbol: &str) -> Option<ContractDetail> {
+        self.contracts
+            .read()
+            .expect("contracts RwLock poisoned")
+            .get(symbol)
+            .cloned()
+    }
+
+    /// Конвертирует объём в базовой валюте (например, BTC) в целое число
+    /// контрактов MEXC. Округление — «обычное» (half-away-from-zero через
+    /// `round_dp(0)`), затем validate `min_vol/max_vol`. Возвращает
+    /// осмысленную ошибку, если размер меньше шага или больше лимита —
+    /// вызывающему коду следует прервать попытку открытия, а не отправлять
+    /// заведомо плохой ордер.
+    pub fn quantity_to_contracts(
+        &self,
+        symbol: &str,
+        quantity: Decimal,
+    ) -> ClientResult<u64> {
+        let detail = self.get_cached_contract(symbol).ok_or_else(|| {
+            ApiError::ExchangeError(format!(
+                "Contract spec for {} not loaded — call fetch_contract_detail at startup",
+                symbol
+            ))
+        })?;
+
+        if quantity <= Decimal::ZERO {
+            return Err(ApiError::ExchangeError(format!(
+                "Non-positive quantity for {}: {}",
+                symbol, quantity
+            )));
+        }
+
+        let contracts_decimal = (quantity / detail.contract_size).round();
+        let contracts = contracts_decimal.to_u64().ok_or_else(|| {
+            ApiError::ExchangeError(format!(
+                "Quantity {} for {} does not fit into u64 contracts ({})",
+                quantity, symbol, contracts_decimal
+            ))
+        })?;
+
+        if contracts < detail.min_vol {
+            return Err(ApiError::ExchangeError(format!(
+                "Quantity {} {} → {} contracts is below MEXC min_vol {}",
+                quantity, symbol, contracts, detail.min_vol
+            )));
+        }
+        if detail.max_vol > 0 && contracts > detail.max_vol {
+            return Err(ApiError::ExchangeError(format!(
+                "Quantity {} {} → {} contracts exceeds MEXC max_vol {}",
+                quantity, symbol, contracts, detail.max_vol
+            )));
+        }
+
+        Ok(contracts)
+    }
+
+    /// Вставляет заранее известную спецификацию контракта в кэш. Используется
+    /// в тестах и при холодной инициализации без сети.
+    #[allow(dead_code)]
+    pub fn insert_contract(&self, detail: ContractDetail) {
+        self.contracts
+            .write()
+            .expect("contracts RwLock poisoned")
+            .insert(detail.symbol.clone(), detail);
     }
 
     async fn check_rate_limit(&self) {
@@ -148,15 +314,18 @@ impl MexcClient {
         let type_code = mexc_order_type(order.order_type.clone());
         let external_oid = Self::generate_external_oid();
 
-        // ВАЖНО: на MEXC futures `vol` — количество контрактов (целое).
-        // Конвертация BTC → контракты должна выполняться выше по стеку
-        // (см. PositionManager). Здесь quantity передаётся «как есть» —
-        // ожидается, что оно уже провалидировано под шаг инструмента.
+        // На MEXC futures `vol` — количество контрактов (целое число).
+        // Конвертируем базовый объём (BTC/ETH/SOL) по сохранённому
+        // contract_size. Если деталь контракта не загружена (например,
+        // забыли вызвать fetch_contract_detail на старте) — возвращаем
+        // ошибку вместо того, чтобы слать заведомо неверный ордер.
+        let vol_contracts = self.quantity_to_contracts(&order.symbol, order.quantity)?;
+
         let mut body = serde_json::json!({
             "symbol": order.symbol,
             "side": side_code,
             "type": type_code,
-            "vol": order.quantity.to_string(),
+            "vol": vol_contracts,
             "leverage": self.default_leverage,
             "openType": self.open_type,
             "externalOid": external_oid,
@@ -173,8 +342,8 @@ impl MexcClient {
         let signature = self.sign(&payload);
 
         debug!(
-            "Placing MEXC order: symbol={} side={} type={} reduce_only={} oid={}",
-            order.symbol, side_code, type_code, reduce_only, external_oid
+            "Placing MEXC order: symbol={} side={} type={} vol={} reduce_only={} oid={}",
+            order.symbol, side_code, type_code, vol_contracts, reduce_only, external_oid
         );
 
         let response = self
@@ -331,6 +500,32 @@ struct MexcBalance {
     frozen_balance: Decimal,
 }
 
+/// Ответ `GET /api/v1/contract/detail`. MEXC возвращает объект с массивом
+/// `data`, даже когда запрошен конкретный символ.
+#[derive(Debug, Deserialize)]
+struct MexcContractDetailResponse {
+    code: i32,
+    msg: Option<String>,
+    #[serde(default)]
+    data: Vec<MexcContractRaw>,
+    success: Option<bool>,
+}
+
+/// Сырой элемент ответа `contract/detail`. Поля из официальной документации
+/// MEXC; часть из них (priceScale/volScale) пока не используется, но
+/// сохраняем на будущее.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
+struct MexcContractRaw {
+    symbol: String,
+    /// MEXC отдаёт как число (например 0.0001). Парсим в f64 и затем в Decimal.
+    contract_size: f64,
+    min_vol: Option<u64>,
+    max_vol: Option<u64>,
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,5 +562,69 @@ mod tests {
         let b = MexcClient::generate_external_oid();
         assert_ne!(a, b, "externalOid must be unique per call");
         assert!(a.starts_with("hft-"));
+    }
+
+    fn client_with_contract(symbol: &str, size: &str, min_vol: u64, max_vol: u64) -> MexcClient {
+        let c = MexcClient::new("K".into(), "S".into());
+        c.insert_contract(ContractDetail {
+            symbol: symbol.into(),
+            contract_size: Decimal::from_str_exact(size).unwrap(),
+            min_vol,
+            max_vol,
+        });
+        c
+    }
+
+    #[test]
+    fn test_quantity_to_contracts_basic_conversion() {
+        // 0.001 BTC при contract_size 0.0001 → 10 контрактов
+        let c = client_with_contract("BTC_USDT", "0.0001", 1, 0);
+        let qty = Decimal::from_str_exact("0.001").unwrap();
+        assert_eq!(c.quantity_to_contracts("BTC_USDT", qty).unwrap(), 10);
+    }
+
+    #[test]
+    fn test_quantity_to_contracts_rounds_half_away_from_zero() {
+        // 0.00015 / 0.0001 = 1.5 → 2 (half-away-from-zero Decimal::round)
+        let c = client_with_contract("BTC_USDT", "0.0001", 1, 0);
+        let qty = Decimal::from_str_exact("0.00015").unwrap();
+        assert_eq!(c.quantity_to_contracts("BTC_USDT", qty).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_quantity_below_min_vol_is_rejected() {
+        // 0.00005 BTC / 0.0001 = 0.5 → 1 контракт, но min_vol = 5 → ошибка
+        let c = client_with_contract("BTC_USDT", "0.0001", 5, 0);
+        let qty = Decimal::from_str_exact("0.00005").unwrap();
+        let err = c.quantity_to_contracts("BTC_USDT", qty).unwrap_err();
+        assert!(
+            format!("{}", err).contains("below MEXC min_vol"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_quantity_above_max_vol_is_rejected() {
+        let c = client_with_contract("BTC_USDT", "0.0001", 1, 10);
+        let qty = Decimal::from_str_exact("0.002").unwrap(); // → 20 контрактов
+        let err = c.quantity_to_contracts("BTC_USDT", qty).unwrap_err();
+        assert!(
+            format!("{}", err).contains("exceeds MEXC max_vol"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_quantity_without_loaded_contract_errors_clearly() {
+        let c = MexcClient::new("K".into(), "S".into());
+        let qty = Decimal::from_str_exact("0.001").unwrap();
+        let err = c.quantity_to_contracts("BTC_USDT", qty).unwrap_err();
+        assert!(
+            format!("{}", err).contains("Contract spec for BTC_USDT not loaded"),
+            "unexpected error: {}",
+            err
+        );
     }
 }
